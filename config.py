@@ -110,6 +110,7 @@ class TrainingConfig:
         self.video_unet_base_channels = 64
         self.video_unet_num_down = 4
         self.video_unet_num_res_blocks = 3
+        self.video_decode_chunk_size = None  # 视频解码分段大小（None表示不分段）
         
         self.channel_type = "awgn"
       
@@ -250,6 +251,7 @@ class EvaluationConfig:
         self.video_unet_base_channels = 64
         self.video_unet_num_down = 4
         self.video_unet_num_res_blocks = 3
+        self.video_decode_chunk_size = None
         self.use_amp = False  # 推理是否启用混合精度
         self.use_gradient_checkpointing = False  # 推理默认关闭梯度检查点
         

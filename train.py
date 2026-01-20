@@ -78,6 +78,7 @@ def create_model(config: TrainingConfig) -> MultimodalJSCC:
         video_unet_base_channels=getattr(config, "video_unet_base_channels", 64),
         video_unet_num_down=getattr(config, "video_unet_num_down", 4),
         video_unet_num_res_blocks=getattr(config, "video_unet_num_res_blocks", 2),
+        video_decode_chunk_size=getattr(config, "video_decode_chunk_size", None),
         channel_type=config.channel_type,
         snr_db=config.snr_db,
         use_quantization_noise=getattr(config, 'use_quantization_noise', False),
@@ -802,6 +803,12 @@ def main():
         help='验证视频采样策略',
     )
     parser.add_argument(
+        '--video-decode-chunk-size',
+        type=int,
+        default=None,
+        help='视频解码分段大小（仅U-Net解码器生效）',
+    )
+    parser.add_argument(
         '--use-amp',
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -869,6 +876,8 @@ def main():
         config.video_sampling_strategy = args.video_sampling_strategy
     if args.video_eval_sampling_strategy:
         config.video_eval_sampling_strategy = args.video_eval_sampling_strategy
+    if args.video_decode_chunk_size is not None:
+        config.video_decode_chunk_size = args.video_decode_chunk_size
     if args.use_amp is not None:
         config.use_amp = args.use_amp
     if args.use_gradient_checkpointing is not None:

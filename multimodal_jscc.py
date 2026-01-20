@@ -106,6 +106,7 @@ class MultimodalJSCC(nn.Module):
         video_unet_base_channels: int = 64,
         video_unet_num_down: int = 4,
         video_unet_num_res_blocks: int = 3,
+        video_decode_chunk_size: Optional[int] = None,
         
         # 信道参数
         channel_type: str = "awgn",
@@ -220,6 +221,7 @@ class MultimodalJSCC(nn.Module):
                 num_res_blocks=video_unet_num_res_blocks,
                 use_tanh=True,
                 normalize_output=normalize_inputs,
+                decode_chunk_size=video_decode_chunk_size,
             )
         
         # 信道模型

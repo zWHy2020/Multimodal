@@ -58,6 +58,7 @@ class VideoUNetDecoder(nn.Module):
         num_res_blocks: int = 2,
         use_tanh: bool = True,
         normalize_output: bool = False,
+        decode_chunk_size: Optional[int] = None,
     ):
         super().__init__()
         if num_down < 1:
@@ -69,6 +70,7 @@ class VideoUNetDecoder(nn.Module):
         self.num_res_blocks = num_res_blocks
         self.use_tanh = use_tanh
         self.normalize_output = normalize_output
+        self.decode_chunk_size = decode_chunk_size
 
         self.in_conv = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1)
 
@@ -127,7 +129,28 @@ class VideoUNetDecoder(nn.Module):
                 f"VideoUNetDecoder expects [B, T, C, H, W], got {tuple(noisy_features.shape)}"
             )
         b, t, c, h, w = noisy_features.shape
-        x = noisy_features.reshape(b * t, c, h, w)
+        chunk_size = self.decode_chunk_size
+        if chunk_size is None or chunk_size <= 0 or chunk_size >= t:
+            x = noisy_features.reshape(b * t, c, h, w)
+            x = self._forward_features(x, h, w, output_size)
+            return x.view(b, t, self.out_channels, *x.shape[-2:])
+
+        decoded_chunks = []
+        for chunk in torch.split(noisy_features, chunk_size, dim=1):
+            chunk_t = chunk.size(1)
+            x = chunk.reshape(b * chunk_t, c, h, w)
+            x = self._forward_features(x, h, w, output_size)
+            x = x.view(b, chunk_t, self.out_channels, *x.shape[-2:])
+            decoded_chunks.append(x)
+        return torch.cat(decoded_chunks, dim=1)
+
+    def _forward_features(
+        self,
+        x: torch.Tensor,
+        h: int,
+        w: int,
+        output_size: Optional[Tuple[int, int]] = None,
+    ) -> torch.Tensor:
         x = self.in_conv(x)
 
         skips = []
@@ -155,5 +178,4 @@ class VideoUNetDecoder(nn.Module):
             w_out = int(output_size[1])
             if x.shape[-2:] != (h_out, w_out):
                 x = F.interpolate(x, size=(h_out, w_out), mode="bilinear", align_corners=False)
-        x = x.view(b, t, self.out_channels, h_out, w_out)
         return x
