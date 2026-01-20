@@ -106,6 +106,7 @@ class MultimodalJSCC(nn.Module):
         video_unet_base_channels: int = 64,
         video_unet_num_down: int = 4,
         video_unet_num_res_blocks: int = 3,
+        video_decode_chunk_size: Optional[int] = None,
         
         # 信道参数
         channel_type: str = "awgn",
@@ -122,6 +123,7 @@ class MultimodalJSCC(nn.Module):
         condition_prob: float = 0.5,
         condition_only_low_snr: bool = True,
         condition_low_snr_threshold: float = 5.0,
+        use_gradient_checkpointing: bool = True,
         
         # 训练参数
     ):
@@ -165,7 +167,8 @@ class MultimodalJSCC(nn.Module):
             output_dim=img_output_dim,
             pretrained=pretrained,  # 【Phase 1】是否使用预训练权重
             freeze_encoder=freeze_encoder,  # 【Phase 1】是否冻结编码器主干
-            pretrained_model_name=pretrained_model_name
+            pretrained_model_name=pretrained_model_name,
+            use_gradient_checkpointing=use_gradient_checkpointing,
             # 不传入 patch_embed, swin_layers, swin_norm，让编码器使用独立路径（768维）
         )
         self.image_decoder = ImageJSCCDecoder(
@@ -179,6 +182,7 @@ class MultimodalJSCC(nn.Module):
             input_dim=img_output_dim,
             semantic_context_dim=text_output_dim,  # 【修复】传入语义上下文维度，与 VideoJSCCDecoder 保持一致
             normalize_output=normalize_inputs,
+            use_gradient_checkpointing=use_gradient_checkpointing,
             # 编码器和解码器都使用 embed_dims，维度完全匹配，无需特殊 guide_dim
         )
         
@@ -191,7 +195,8 @@ class MultimodalJSCC(nn.Module):
             output_dim=video_output_dim,
             mlp_ratio=mlp_ratio,
             img_size=img_size,
-            patch_size=patch_size
+            patch_size=patch_size,
+            use_gradient_checkpointing=use_gradient_checkpointing,
             # 不传入 patch_embed, swin_layers, swin_norm，让编码器使用独立路径
         )
         if video_decoder_type.lower() == "swin":
@@ -205,6 +210,7 @@ class MultimodalJSCC(nn.Module):
                 patch_size=patch_size,  # 添加 patch 大小参数，用于上采样
                 semantic_context_dim=text_output_dim,  # 添加语义上下文维度，用于语义对齐层
                 normalize_output=normalize_inputs,
+                use_gradient_checkpointing=use_gradient_checkpointing,
             )
         else:
             self.video_decoder = VideoUNetDecoder(
@@ -215,6 +221,7 @@ class MultimodalJSCC(nn.Module):
                 num_res_blocks=video_unet_num_res_blocks,
                 use_tanh=True,
                 normalize_output=normalize_inputs,
+                decode_chunk_size=video_decode_chunk_size,
             )
         
         # 信道模型

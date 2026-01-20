@@ -38,6 +38,7 @@ class TrainingConfig:
         self.grad_clip_norm = 1.0
         self.gradient_accumulation_steps = 2  # 优化：按比例降低，保持等效批次大小=8*8=64不变
         self.use_amp = True  # 是否使用混合精度训练（自动混合精度）
+        self.use_gradient_checkpointing = True  # 是否启用梯度检查点节省显存
         
         # 学习率调度
         self.lr_scheduler = 'cosine'  # 'cosine', 'step', 'plateau'
@@ -109,6 +110,7 @@ class TrainingConfig:
         self.video_unet_base_channels = 64
         self.video_unet_num_down = 4
         self.video_unet_num_res_blocks = 3
+        self.video_decode_chunk_size = None  # 视频解码分段大小（None表示不分段）
         
         self.channel_type = "awgn"
       
@@ -249,7 +251,9 @@ class EvaluationConfig:
         self.video_unet_base_channels = 64
         self.video_unet_num_down = 4
         self.video_unet_num_res_blocks = 3
+        self.video_decode_chunk_size = None
         self.use_amp = False  # 推理是否启用混合精度
+        self.use_gradient_checkpointing = False  # 推理默认关闭梯度检查点
         
         self.channel_type = "awgn"
         # 文本引导与条件约束（评估侧保持与训练一致的开关）
