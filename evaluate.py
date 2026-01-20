@@ -34,6 +34,10 @@ from utils import (
 )
 
 
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
+
+
 class EvaluationDataset(Dataset):
     """
     专门用于评估的数据集类
@@ -50,25 +54,28 @@ class EvaluationDataset(Dataset):
         data_list: list,
         text_tokenizer=None,
         max_text_length: int = 512,
-        max_video_frames: int = 10
+        max_video_frames: int = 10,
+        normalize: bool = False
     ):
         self.data_dir = data_dir
         self.data_list = data_list
         self.text_tokenizer = text_tokenizer
         self.max_text_length = max_text_length
         self.max_video_frames = max_video_frames
+        self.normalize = normalize
         
         # 图像变换：不使用 Resize，只进行 ToTensor 和 Normalize
         # 注意：保持 ImageNet 归一化，用于与训练时一致
-        self.image_transform = transforms.Compose([
-            transforms.ToTensor(),
-           
-        ])
+        image_steps = [transforms.ToTensor()]
+        if self.normalize:
+            image_steps.append(transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD))
+        self.image_transform = transforms.Compose(image_steps)
         
         # 视频变换：同样不使用 Resize
-        self.video_transform = transforms.Compose([
-            transforms.ToTensor(),
-        ])
+        video_steps = [transforms.ToTensor()]
+        if self.normalize:
+            video_steps.append(transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD))
+        self.video_transform = transforms.Compose(video_steps)
     
     def __len__(self) -> int:
         return len(self.data_list)
@@ -669,7 +676,8 @@ def evaluate_single_snr(
                 current_metrics = calculate_multimodal_metrics(
                     predictions=results,
                     targets=device_targets,
-                    attention_mask=attention_mask
+                    attention_mask=attention_mask,
+                    imagenet_normalized=getattr(config, "normalize", False),
                 )
             except Exception as e:
                 logger.error(f"计算当前批次评估指标时出错: {e}")
@@ -857,28 +865,29 @@ def main():
         
         # 尝试从检查点中恢复模型配置（如果存在）
         model_kwargs = {
-            'vocab_size': 10000,
-            'text_embed_dim': 512,
-            'text_num_heads': 8,
-            'text_num_layers': 6,
-            'text_output_dim': 256,
-            'img_size': (224, 224),
-            'patch_size': 4,
-            'img_embed_dims': [96, 192, 384, 768],
-            'img_depths': [2, 2, 18, 2],
-            'img_num_heads': [3, 6, 12, 24],
-            'img_output_dim': 256,
-            'video_hidden_dim': 256,
-            'video_num_frames': 5,
-            'video_use_optical_flow': True,
-            'video_use_convlstm': True,
-            'video_output_dim': 256,
-            'video_decoder_type': "unet",
-            'video_unet_base_channels': 64,
-            'video_unet_num_down': 4,
-            'video_unet_num_res_blocks': 3,
-            'channel_type': "awgn",
-            'snr_db': 10.0
+            'vocab_size': config.vocab_size,
+            'text_embed_dim': config.text_embed_dim,
+            'text_num_heads': config.text_num_heads,
+            'text_num_layers': config.text_num_layers,
+            'text_output_dim': config.text_output_dim,
+            'img_size': config.img_size,
+            'patch_size': config.img_patch_size,
+            'img_embed_dims': config.img_embed_dims,
+            'img_depths': config.img_depths,
+            'img_num_heads': config.img_num_heads,
+            'img_output_dim': config.img_output_dim,
+            'video_hidden_dim': config.video_hidden_dim,
+            'video_num_frames': config.video_num_frames,
+            'video_use_optical_flow': config.video_use_optical_flow,
+            'video_use_convlstm': config.video_use_convlstm,
+            'video_output_dim': config.video_output_dim,
+            'video_decoder_type': config.video_decoder_type,
+            'video_unet_base_channels': config.video_unet_base_channels,
+            'video_unet_num_down': config.video_unet_num_down,
+            'video_unet_num_res_blocks': config.video_unet_num_res_blocks,
+            'channel_type': config.channel_type,
+            'snr_db': config.snr_db,
+            'normalize_inputs': getattr(config, "normalize", False),
         }
         
         # 如果检查点中包含模型配置，使用检查点的配置
@@ -938,7 +947,8 @@ def main():
         data_list=test_data_list,
         text_tokenizer=None,  # 可以根据需要传入 tokenizer
         max_text_length=config.max_text_length,
-        max_video_frames=config.max_video_frames
+        max_video_frames=config.max_video_frames,
+        normalize=getattr(config, "normalize", False),
     )
     
     # 评估时必须使用 batch_size=1，因为不同尺寸的图像无法堆叠

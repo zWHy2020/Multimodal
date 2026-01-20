@@ -75,6 +75,7 @@ class TrainingConfig:
         self.train_snr_min = -5.0  # 训练时SNR范围
         self.train_snr_max = 15.0
         self.train_snr_random = False # 是否随机SNR
+        self.train_snr_strategy = "curriculum"  # random | curriculum | fixed
         self.snr_db = 10.0
 
         # 带宽/码率调度（通道门控）
@@ -89,7 +90,7 @@ class TrainingConfig:
         self.text_num_layers = 6
         self.text_output_dim = 256
         self.pretrained_model_name = 'swin_base_patch4_window7_224'
-        self.img_size = (224, 224)
+        self.img_size = (256, 512)
         self.patch_size = 4
         self.img_window_size = 7
         # 重构：减小Swin Transformer的深度和宽度以节省显存
@@ -100,7 +101,7 @@ class TrainingConfig:
         self.mlp_ratio = 4.0
         
         self.video_hidden_dim = 384
-        self.video_num_frames = 5
+        self.video_num_frames = 10
         self.video_use_optical_flow = True  # 默认启用光流用于时序对齐
         self.video_use_convlstm = True  # 默认启用ConvLSTM建模时序
         self.video_output_dim = 256
@@ -117,7 +118,7 @@ class TrainingConfig:
         self.train_manifest = None
         self.val_manifest = None
         self.max_text_length = 512
-        self.max_video_frames = 3
+        self.max_video_frames = 10
         self.video_clip_len = self.max_video_frames
         self.video_stride = 1
         self.video_sampling_strategy = "contiguous_clip"
@@ -142,6 +143,12 @@ class TrainingConfig:
         self.ddp_find_unused_parameters = True  # DDP下允许未使用参数（用于缺失模态场景）
         self.use_quantization_noise = True  # 【新增】是否启用量化噪声模拟
         self.quantization_noise_range = 0.5  # 【新增】量化噪声范围（均匀分布 [-r, r]）
+        # 输入归一化（ImageNet mean/std）
+        self.normalize = True
+        # 视频感知/一致性附加损失权重
+        self.video_perceptual_weight = 0.01
+        self.temporal_perceptual_weight = 0.02
+        self.color_consistency_weight = 0.02
     def print_config(self, logger=None):
         log_func = logger.info if logger else print
         log_func("\n=== 当前生效的配置 (TrainingConfig) ===")
@@ -192,7 +199,7 @@ class EvaluationConfig:
         self.snr_max = 15.0
         
         # Patch-based推理设置（用于处理任意尺寸图像）
-        self.use_patch_inference = True
+        self.use_patch_inference = False
         self.patch_size = 128  # patch大小
         self.patch_overlap = 32  # patch重叠区域
         
@@ -205,7 +212,7 @@ class EvaluationConfig:
         self.image_save_dir = None
         
         # 数据加载参数
-        self.image_size = (256, 256)
+        self.image_size = (256, 512)
         self.max_text_length = 512
         self.max_video_frames = 10
         self.video_clip_len = self.max_video_frames
@@ -223,7 +230,7 @@ class EvaluationConfig:
         self.text_num_layers = 6
         self.text_output_dim = 256
         
-        self.img_size = (224, 224)
+        self.img_size = (256, 512)
         self.img_patch_size = 4 
         self.mlp_ratio = 4.0 # 注意：这是模型内部的patch_size，不同于推理时的patch_size
         # 重构：减小Swin Transformer的深度和宽度以节省显存
@@ -234,7 +241,7 @@ class EvaluationConfig:
         self.pretrained_model_name = None  # 推理时可手动指定，与训练保持一致
         
         self.video_hidden_dim = 256
-        self.video_num_frames = 3
+        self.video_num_frames = 10
         self.video_use_optical_flow = True  # 推理侧默认启用光流
         self.video_use_convlstm = True  # 推理侧默认启用ConvLSTM
         self.video_output_dim = 256
@@ -254,4 +261,6 @@ class EvaluationConfig:
         self.condition_margin_weight = 0.1
         self.condition_only_low_snr = True
         self.condition_low_snr_threshold = 5.0
+        # 输入归一化（ImageNet mean/std）
+        self.normalize = True
 

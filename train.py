@@ -82,6 +82,7 @@ def create_model(config: TrainingConfig) -> MultimodalJSCC:
         snr_db=config.snr_db,
         use_quantization_noise=getattr(config, 'use_quantization_noise', False),
         quantization_noise_range=getattr(config, 'quantization_noise_range', 0.5),
+        normalize_inputs=getattr(config, "normalize", False),
         use_text_guidance_image=getattr(config, "use_text_guidance_image", False),
         use_text_guidance_video=getattr(config, "use_text_guidance_video", False),
         enforce_text_condition=getattr(config, "enforce_text_condition", True),
@@ -104,6 +105,9 @@ def create_loss_fn(config: TrainingConfig) -> MultimodalLoss:
         reconstruction_weight=config.reconstruction_weight,
         perceptual_weight=config.perceptual_weight,
         temporal_weight=config.temporal_weight,
+        video_perceptual_weight=getattr(config, "video_perceptual_weight", 0.0),
+        temporal_perceptual_weight=getattr(config, "temporal_perceptual_weight", 0.0),
+        color_consistency_weight=getattr(config, "color_consistency_weight", 0.0),
         text_contrastive_weight=getattr(config, 'text_contrastive_weight', 0.1),  # 【新增】文本对比损失权重
         video_text_contrastive_weight=getattr(config, 'video_text_contrastive_weight', 0.05),  # 【新增】视频-文本对比损失权重
         rate_weight=getattr(config, 'rate_weight', 1e-4),  # 【新增】码率/能量约束权重
@@ -112,6 +116,7 @@ def create_loss_fn(config: TrainingConfig) -> MultimodalLoss:
         use_adversarial=getattr(config, 'use_adversarial', False),  # 【Phase 3】是否使用对抗训练
         condition_margin_weight=getattr(config, "condition_margin_weight", 0.0),
         condition_margin=getattr(config, "condition_margin", 0.05),
+        normalize=getattr(config, "normalize", False),
         data_range=1.0
     )
     return loss_fn
@@ -270,7 +275,8 @@ def train_one_epoch(
     global_step = epoch * len(train_loader)
     accumulation_steps = config.gradient_accumulation_steps
     snr_generator = None
-    if config.train_snr_random:
+    snr_strategy = getattr(config, "train_snr_strategy", "fixed")
+    if snr_strategy == "random":
         snr_generator = torch.Generator(device="cpu")
         snr_generator.manual_seed(config.seed + epoch)
     
@@ -329,10 +335,14 @@ def train_one_epoch(
             if value is not None:
                 device_targets[key] = value.to(device, non_blocking=True)
         
-        # 随机SNR（如果启用）
-        if config.train_snr_random:
+        # SNR策略：random / curriculum / fixed
+        if snr_strategy == "random":
             rand_value = torch.rand(1, generator=snr_generator).item()
             snr_db = config.train_snr_min + (config.train_snr_max - config.train_snr_min) * rand_value
+        elif snr_strategy == "curriculum":
+            total_epochs = max(1, int(getattr(config, "num_epochs", 1)))
+            progress = min(1.0, max(0.0, epoch / float(total_epochs - 1))) if total_epochs > 1 else 1.0
+            snr_db = config.train_snr_max - (config.train_snr_max - config.train_snr_min) * progress
         else:
             snr_db = config.snr_db
         
@@ -583,14 +593,14 @@ def train_one_epoch(
             meters['image_loss'].update(loss_dict.get('image_loss', 0.0))
         if 'video_loss' in loss_dict:
             meters['video_loss'].update(loss_dict.get('video_loss', 0.0))
-        if 'image_recon_loss_l1' in loss_dict:
-            meters['image_recon_loss'].update(loss_dict.get('image_recon_loss_l1', 0.0))
-        if 'image_percep_loss_msssim' in loss_dict:
-            meters['image_percep_loss'].update(loss_dict.get('image_percep_loss_msssim', 0.0))
+        if 'image_recon_loss' in loss_dict:
+            meters['image_recon_loss'].update(loss_dict.get('image_recon_loss', 0.0))
+        if 'image_percep_loss' in loss_dict:
+            meters['image_percep_loss'].update(loss_dict.get('image_percep_loss', 0.0))
         if 'video_recon_loss_l1' in loss_dict:
             meters['video_recon_loss'].update(loss_dict.get('video_recon_loss_l1', 0.0))
-        if 'video_percep_loss_msssim' in loss_dict:
-            meters['video_percep_loss'].update(loss_dict.get('video_percep_loss_msssim', 0.0))
+        if 'video_percep_loss' in loss_dict:
+            meters['video_percep_loss'].update(loss_dict.get('video_percep_loss', 0.0))
         if 'video_temporal_loss_l1' in loss_dict:
             meters['video_temporal_loss'].update(loss_dict.get('video_temporal_loss_l1', 0.0))
         if 'condition_margin_loss' in loss_dict:
@@ -731,7 +741,8 @@ def validate(
             if 'image_decoded' in results and 'image' in device_targets:
                 batch_psnr = calculate_multimodal_metrics(
                     {'image_decoded': results['image_decoded']},
-                    {'image': device_targets['image']}
+                    {'image': device_targets['image']},
+                    imagenet_normalized=getattr(config, "normalize", False),
                 ).get('image_psnr', 0.0)
                 meters['image_psnr'].update(batch_psnr, n=inputs['image_input'].size(0))
             meters['time'].update(time.time() - start_time)
@@ -764,6 +775,13 @@ def main():
     parser.add_argument('--video-clip-len', type=int, default=None, help='视频训练clip长度')
     parser.add_argument('--video-stride', type=int, default=None, help='视频滑窗stride')
     parser.add_argument('--train-snr-random', action='store_true', help='训练时启用随机SNR')
+    parser.add_argument(
+        '--train-snr-strategy',
+        type=str,
+        default=None,
+        choices=["random", "curriculum", "fixed"],
+        help='训练SNR策略（默认使用配置）',
+    )
     parser.add_argument('--train-snr-min', type=float, default=None, help='训练随机SNR最小值')
     parser.add_argument('--train-snr-max', type=float, default=None, help='训练随机SNR最大值')
     parser.add_argument('--use-text-guidance-image', action='store_true', help='启用文本语义引导图像重建')
@@ -831,6 +849,7 @@ def main():
     if args.video_clip_len:
         config.video_clip_len = args.video_clip_len
         config.max_video_frames = args.video_clip_len
+        config.video_num_frames = args.video_clip_len
     if args.video_stride:
         config.video_stride = args.video_stride
     if args.video_sampling_strategy:
@@ -838,7 +857,10 @@ def main():
     if args.video_eval_sampling_strategy:
         config.video_eval_sampling_strategy = args.video_eval_sampling_strategy
     if args.train_snr_random:
+        config.train_snr_strategy = "random"
         config.train_snr_random = True
+    if args.train_snr_strategy:
+        config.train_snr_strategy = args.train_snr_strategy
     if args.train_snr_min is not None:
         config.train_snr_min = args.train_snr_min
     if args.train_snr_max is not None:
@@ -1044,6 +1066,7 @@ def main():
         allow_missing_modalities=getattr(config, "allow_missing_modalities", False),
         strict_mode=getattr(config, "strict_data_loading", True),
         required_modalities=("video", "text"),
+        normalize=getattr(config, "normalize", False),
         seed=config.seed,
     )
     
@@ -1144,6 +1167,7 @@ def main():
         'video_use_convlstm': config.video_use_convlstm,
         'video_output_dim': config.video_output_dim,
         'channel_type': config.channel_type,
+        'normalize_inputs': getattr(config, "normalize", False),
         'pretrained': getattr(config, 'pretrained', False),
         'freeze_encoder': getattr(config, 'freeze_encoder', False),
         'pretrained_model_name': getattr(config, 'pretrained_model_name', None),
@@ -1153,6 +1177,7 @@ def main():
         'video_eval_sampling_strategy': config.video_eval_sampling_strategy,
         'snr_db': config.snr_db,
         'train_snr_random': config.train_snr_random,
+        'train_snr_strategy': getattr(config, "train_snr_strategy", "fixed"),
         'train_snr_min': config.train_snr_min,
         'train_snr_max': config.train_snr_max,
         'bandwidth_ratio_start': getattr(config, "bandwidth_ratio_start", 1.0),

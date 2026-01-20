@@ -113,6 +113,7 @@ class MultimodalJSCC(nn.Module):
         power_normalization: bool = True,
         use_quantization_noise: bool = False,
         quantization_noise_range: float = 0.5,
+        normalize_inputs: bool = False,
         use_text_guidance_image: bool = False,
         use_text_guidance_video: bool = False,
         enforce_text_condition: bool = True,
@@ -176,7 +177,8 @@ class MultimodalJSCC(nn.Module):
             window_size=img_window_size,
             mlp_ratio=mlp_ratio,
             input_dim=img_output_dim,
-            semantic_context_dim=text_output_dim  # 【修复】传入语义上下文维度，与 VideoJSCCDecoder 保持一致
+            semantic_context_dim=text_output_dim,  # 【修复】传入语义上下文维度，与 VideoJSCCDecoder 保持一致
+            normalize_output=normalize_inputs,
             # 编码器和解码器都使用 embed_dims，维度完全匹配，无需特殊 guide_dim
         )
         
@@ -201,7 +203,8 @@ class MultimodalJSCC(nn.Module):
                 input_dim=video_output_dim,
                 img_size=img_size,  # 添加图像尺寸参数，用于上采样
                 patch_size=patch_size,  # 添加 patch 大小参数，用于上采样
-                semantic_context_dim=text_output_dim  # 添加语义上下文维度，用于语义对齐层
+                semantic_context_dim=text_output_dim,  # 添加语义上下文维度，用于语义对齐层
+                normalize_output=normalize_inputs,
             )
         else:
             self.video_decoder = VideoUNetDecoder(
@@ -210,7 +213,8 @@ class MultimodalJSCC(nn.Module):
                 base_channels=video_unet_base_channels,
                 num_down=video_unet_num_down,
                 num_res_blocks=video_unet_num_res_blocks,
-                use_sigmoid=True,
+                use_tanh=True,
+                normalize_output=normalize_inputs,
             )
         
         # 信道模型
@@ -221,6 +225,7 @@ class MultimodalJSCC(nn.Module):
         )
         self.use_quantization_noise = use_quantization_noise
         self.quantization_noise_range = quantization_noise_range
+        self.normalize_inputs = normalize_inputs
         self.use_text_guidance_image = use_text_guidance_image
         self.use_text_guidance_video = use_text_guidance_video
         self.enforce_text_condition = enforce_text_condition
@@ -348,17 +353,15 @@ class MultimodalJSCC(nn.Module):
         results['bandwidth_ratio'] = self.bandwidth_ratio
         
         # 功率归一化
-        #for modality in encoded_features:
-            #if modality in self.power_normalizer:
-                #if modality == 'video':
+        for modality, features in encoded_features.items():
+            if modality in self.power_normalizer:
+                if modality == 'video':
                     # 视频特征形状为 [B, T, C, H, W]，需要将归一化维度放到最后
-                    #v = encoded_features[modality].permute(0, 1, 3, 4, 2)
-                    #v = self.power_normalizer[modality](v)
-                    #encoded_features[modality] = v.permute(0, 1, 4, 2, 3)
-                #else:
-                    #encoded_features[modality] = self.power_normalizer[modality](
-                        #encoded_features[modality]
-                    #)
+                    v = features.permute(0, 1, 3, 4, 2)
+                    v = self.power_normalizer[modality](v)
+                    encoded_features[modality] = v.permute(0, 1, 4, 2, 3)
+                else:
+                    encoded_features[modality] = self.power_normalizer[modality](features)
         
         # 信道传输
         transmitted_features = {}
