@@ -722,7 +722,8 @@ class VideoJSCCDecoder(nn.Module):
         img_size: Tuple[int, int] = (224, 224),
         patch_size: int = 4,
         semantic_context_dim: int = 256,
-        mlp_ratio: float = 4.0  # 添加语义上下文维度参数
+        mlp_ratio: float = 4.0,  # 添加语义上下文维度参数
+        normalize_output: bool = False,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -734,6 +735,9 @@ class VideoJSCCDecoder(nn.Module):
         self.img_size = img_size
         self.patch_size = patch_size
         self.semantic_context_dim = semantic_context_dim
+        self.normalize_output = normalize_output
+        self.register_buffer("output_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer("output_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
         self.patches_resolution = (img_size[0] // patch_size, img_size[1] // patch_size)  # (56, 56)
         
         # 输入投影
@@ -807,7 +811,7 @@ class VideoJSCCDecoder(nn.Module):
         # 由于 PatchReverseMerging 已经上采样到 224×224，这里仅进行通道映射
         self.output_proj = nn.Sequential(
             nn.Conv2d(hidden_dim, out_channels, kernel_size=1),
-            nn.Sigmoid()  # 添加 Sigmoid 激活函数，确保输出在 [0, 1] 范围内
+            nn.Tanh()
         )
         
         # ConvLSTM 时序建模
@@ -1081,8 +1085,11 @@ class VideoJSCCDecoder(nn.Module):
             )
         x = x.view(B, h, w, -1).permute(0, 3, 1, 2)  # [B, hidden_dim, H', W']
         
-        # 输出投影（通道映射 + Sigmoid）
+        # 输出投影（通道映射 + Tanh）
         x = self.output_proj(x)
+        x = (x + 1.0) / 2.0
+        if self.normalize_output:
+            x = (x - self.output_mean) / self.output_std
         if output_size is not None:
             x = x[..., : output_size[0], : output_size[1]]
         

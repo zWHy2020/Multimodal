@@ -30,6 +30,9 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+
 
 def _log_nonfinite(name: str, tensor: torch.Tensor) -> bool:
     if not torch.is_tensor(tensor):
@@ -1186,13 +1189,17 @@ class ImageJSCCDecoder(nn.Module):
         norm_layer: nn.Module = nn.LayerNorm,
         input_dim: int = 256,
         guide_dim: Optional[int] = None,
-        semantic_context_dim: int = 256  # 【修复】添加参数，与 VideoJSCCDecoder 保持一致
+        semantic_context_dim: int = 256,  # 【修复】添加参数，与 VideoJSCCDecoder 保持一致
+        normalize_output: bool = False,
     ):
         super().__init__()
         self.num_layers = len(depths)
         self.embed_dims = embed_dims
         self.img_size = img_size  # 保存img_size用于output_proj计算
         self.patches_resolution = (img_size[0] // patch_size, img_size[1] // patch_size)
+        self.normalize_output = normalize_output
+        self.register_buffer("output_mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1))
+        self.register_buffer("output_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1))
         
         # 输入投影
         self.input_proj = nn.Sequential(
@@ -1272,8 +1279,7 @@ class ImageJSCCDecoder(nn.Module):
             # 【优化】使用Tanh替代Sigmoid，然后缩放到[0,1]，提高对比度
             # Tanh输出范围[-1,1]，通过 (tanh + 1) / 2 映射到[0,1]，但对比度更好
             nn.PixelShuffle(patch_size),
-            # 添加可学习的对比度增强参数（不增加显存，只是一个标量）
-            nn.Sigmoid()  # 占位，实际缩放通过后处理完成
+            nn.Tanh()
         )
         
         # 引导向量处理器
@@ -1506,6 +1512,10 @@ class ImageJSCCDecoder(nn.Module):
         
         # 输出投影
         x = self.output_proj(x)
+        # Tanh -> [0, 1]
+        x = (x + 1.0) / 2.0
+        if self.normalize_output:
+            x = (x - self.output_mean) / self.output_std
         if output_size is not None:
             x = x[..., : output_size[0], : output_size[1]]
         

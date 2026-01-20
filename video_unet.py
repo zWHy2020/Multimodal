@@ -46,7 +46,7 @@ class VideoUNetDecoder(nn.Module):
         base_channels: U-Net最浅层通道数。
         num_down: 下采样层数（包含最浅层）。
         num_res_blocks: 每层残差块数量。
-        use_sigmoid: 是否在输出端使用Sigmoid，保证输出范围在[0, 1]。
+        use_tanh: 是否在输出端使用Tanh，输出范围在[-1, 1]。
     """
 
     def __init__(
@@ -56,7 +56,8 @@ class VideoUNetDecoder(nn.Module):
         base_channels: int = 64,
         num_down: int = 4,
         num_res_blocks: int = 2,
-        use_sigmoid: bool = True,
+        use_tanh: bool = True,
+        normalize_output: bool = False,
     ):
         super().__init__()
         if num_down < 1:
@@ -66,7 +67,8 @@ class VideoUNetDecoder(nn.Module):
         self.base_channels = base_channels
         self.num_down = num_down
         self.num_res_blocks = num_res_blocks
-        self.use_sigmoid = use_sigmoid
+        self.use_tanh = use_tanh
+        self.normalize_output = normalize_output
 
         self.in_conv = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1)
 
@@ -98,7 +100,9 @@ class VideoUNetDecoder(nn.Module):
             self.up_blocks.append(nn.Sequential(*res_layers))
 
         self.out_conv = nn.Conv2d(base_channels, out_channels, kernel_size=3, padding=1)
-        self.out_act = nn.Sigmoid() if use_sigmoid else nn.Identity()
+        self.out_act = nn.Tanh() if use_tanh else nn.Identity()
+        self.register_buffer("output_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer("output_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
 
     def forward(
         self,
@@ -142,6 +146,9 @@ class VideoUNetDecoder(nn.Module):
             x = self.up_blocks[i](x)
 
         x = self.out_act(self.out_conv(x))
+        x = (x + 1.0) / 2.0
+        if self.normalize_output:
+            x = (x - self.output_mean) / self.output_std
         h_out, w_out = h, w
         if output_size is not None:
             h_out = int(output_size[0])
