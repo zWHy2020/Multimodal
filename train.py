@@ -91,6 +91,7 @@ def create_model(config: TrainingConfig) -> MultimodalJSCC:
         condition_prob=getattr(config, "condition_prob", 0.0),
         condition_only_low_snr=getattr(config, "condition_only_low_snr", False),
         condition_low_snr_threshold=getattr(config, "condition_low_snr_threshold", 5.0),
+        use_gradient_checkpointing=getattr(config, "use_gradient_checkpointing", True),
     )
     return model
 
@@ -806,6 +807,12 @@ def main():
         default=None,
         help='启用混合精度训练（AMP）',
     )
+    parser.add_argument(
+        '--use-gradient-checkpointing',
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help='启用梯度检查点以节省显存',
+    )
     parser.add_argument('--local-rank', type=int, default=None, help='分布式训练的本地进程rank')
     parser.add_argument('--distributed', action='store_true', help='启用分布式训练')
     args = parser.parse_args()
@@ -864,6 +871,8 @@ def main():
         config.video_eval_sampling_strategy = args.video_eval_sampling_strategy
     if args.use_amp is not None:
         config.use_amp = args.use_amp
+    if args.use_gradient_checkpointing is not None:
+        config.use_gradient_checkpointing = args.use_gradient_checkpointing
     if args.train_snr_random:
         config.train_snr_strategy = "random"
         config.train_snr_random = True
