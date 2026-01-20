@@ -423,7 +423,8 @@ class VideoJSCCEncoder(nn.Module):
         patch_embed: Optional[nn.Module] = None,
         swin_layers: Optional[nn.ModuleList] = None,
         swin_norm: Optional[nn.Module] = None,
-        mlp_ratio: float = 4.0
+        mlp_ratio: float = 4.0,
+        use_gradient_checkpointing: bool = True,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -431,6 +432,7 @@ class VideoJSCCEncoder(nn.Module):
         self.num_frames = num_frames
         self.use_optical_flow = use_optical_flow
         self.use_convlstm = use_convlstm
+        self.use_gradient_checkpointing = use_gradient_checkpointing
         
         # 光流估计
         if use_optical_flow:
@@ -671,7 +673,8 @@ class VideoJSCCEncoder(nn.Module):
         #try:
         resolution = patch_resolution
         for layer in self.swin_layers:
-            x, resolution = layer(x, input_resolution=resolution)
+            use_checkpoint = self.use_gradient_checkpointing and self.training
+            x, resolution = layer(x, input_resolution=resolution, use_checkpoint=use_checkpoint)
         self.last_latent_resolution = resolution
         #except Exception as e:
             #print(f"[Warn] VideoJSCCEncoder.swin_layers 失败，启用简化路径: {e}; x.shape={tuple(x.shape)}")
@@ -724,6 +727,7 @@ class VideoJSCCDecoder(nn.Module):
         semantic_context_dim: int = 256,
         mlp_ratio: float = 4.0,  # 添加语义上下文维度参数
         normalize_output: bool = False,
+        use_gradient_checkpointing: bool = True,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -736,6 +740,7 @@ class VideoJSCCDecoder(nn.Module):
         self.patch_size = patch_size
         self.semantic_context_dim = semantic_context_dim
         self.normalize_output = normalize_output
+        self.use_gradient_checkpointing = use_gradient_checkpointing
         self.register_buffer("output_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
         self.register_buffer("output_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
         self.patches_resolution = (img_size[0] // patch_size, img_size[1] // patch_size)  # (56, 56)
@@ -1071,7 +1076,8 @@ class VideoJSCCDecoder(nn.Module):
         # 通过Swin Transformer层（包含上采样）
         resolution = (H, W)
         for i, layer in enumerate(self.swin_layers):
-            x, resolution = layer(x, input_resolution=resolution, use_checkpoint=self.training)
+            use_checkpoint = self.use_gradient_checkpointing and self.training
+            x, resolution = layer(x, input_resolution=resolution, use_checkpoint=use_checkpoint)
         
         # 重塑为特征图格式
         # 经过 PatchReverseMerging 上采样后，特征图尺寸应为原始图像的尺寸
