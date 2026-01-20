@@ -1025,6 +1025,7 @@ def load_model(model_path: str, config: EvaluationConfig, device: torch.device, 
             'video_unet_num_res_blocks': getattr(config, "video_unet_num_res_blocks", 2),
             'channel_type': config.channel_type,
             'snr_db': config.snr_db,
+            'normalize_inputs': getattr(config, "normalize", False),
             'pretrained': False, # 推理时强制关闭
         }
         if getattr(config, "pretrained_model_name", None):
@@ -1032,6 +1033,7 @@ def load_model(model_path: str, config: EvaluationConfig, device: torch.device, 
     model_config["snr_db"] = config.snr_db
     model_config["use_text_guidance_image"] = getattr(config, "use_text_guidance_image", False)
     model_config["use_text_guidance_video"] = getattr(config, "use_text_guidance_video", False)
+    model_config["normalize_inputs"] = getattr(config, "normalize", False)
     model_kwargs = dict(model_config)
     try:
         model_param_names = set(inspect.signature(MultimodalJSCC.__init__).parameters.keys())
@@ -1170,7 +1172,7 @@ def main():
     parser.add_argument('--snr-random', action='store_true', help='推理时启用随机SNR')
     parser.add_argument('--snr-min', type=float, default=None, help='推理随机SNR最小值')
     parser.add_argument('--snr-max', type=float, default=None, help='推理随机SNR最大值')
-    parser.add_argument('--no-patch', action='store_true', help='禁用patch-based推理')
+    parser.add_argument('--patch', action='store_true', help='启用patch-based推理')
     parser.add_argument('--video_fps', type=float, default=10.0, help='视频保存帧率')
     parser.add_argument('--infer-window-len', type=int, default=None, help='滑窗推理window长度')
     parser.add_argument('--infer-window-stride', type=int, default=None, help='滑窗推理stride')
@@ -1182,7 +1184,12 @@ def main():
         choices=["contiguous_clip", "uniform", "fixed_start"],
         help='推理侧记录的采样策略（用于日志显示）',
     )
-    parser.add_argument('--normalize', action='store_true', help='使用ImageNet归一化（与旧模型兼容）')
+    parser.add_argument(
+        '--normalize',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='使用ImageNet归一化（与旧模型兼容）',
+    )
     parser.add_argument(
         '--save_video_mp4',
         action=argparse.BooleanOptionalAction,
@@ -1220,11 +1227,12 @@ def main():
         config.snr_min = args.snr_min
     if args.snr_max is not None:
         config.snr_max = args.snr_max
-    config.use_patch_inference = not args.no_patch
+    config.use_patch_inference = bool(args.patch)
     config.pretrained_model_name = args.pretrained_model_name
     config.infer_window_len = args.infer_window_len
     config.infer_window_stride = args.infer_window_stride
     config.max_output_frames = args.max_output_frames
+    config.normalize = args.normalize
     if args.use_text_guidance_image:
         config.use_text_guidance_image = True
     if args.use_text_guidance_video:
@@ -1456,8 +1464,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
 
 
 

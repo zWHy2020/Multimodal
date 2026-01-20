@@ -21,6 +21,9 @@ except ImportError:
     LPIPS_AVAILABLE = False
     print("警告: LPIPS库未安装，将使用VGG特征损失作为替代。建议安装: pip install lpips")
 
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+
 
 # --------------------------------------------------------------------------
 # MS-SSIM 损失函数的实现
@@ -433,14 +436,25 @@ class ImageLoss(nn.Module):
     
     使用L1重建损失 + LPIPS感知损失，以提升重建的感知质量。
     """
-    def __init__(self, reconstruction_weight: float = 1.0, msssim_weight: float = 0.5,perceptual_weight: float = 0.1,gradient_weight: float = 0.1, data_range: float = 1.0):
+    def __init__(
+        self,
+        reconstruction_weight: float = 1.0,
+        msssim_weight: float = 0.5,
+        perceptual_weight: float = 0.1,
+        gradient_weight: float = 0.1,
+        data_range: float = 1.0,
+        normalize: bool = False,
+    ):
         super().__init__()
         self.recon_weight = reconstruction_weight
         self.msssim_weight = msssim_weight
         self.percep_weight = perceptual_weight
         self.grad_weight = gradient_weight
         self.data_range = data_range
+        self.normalize = normalize
         self.epsilon = 1e-6
+        self.register_buffer("imagenet_mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1))
+        self.register_buffer("imagenet_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1))
         self.msssim_loss_fn = MSSSIM(
             window_size=11,
             channel=3,
@@ -482,32 +496,36 @@ class ImageLoss(nn.Module):
         
         #return img
         
+    def _maybe_denormalize(self, tensor: torch.Tensor) -> torch.Tensor:
+        if not self.normalize:
+            return tensor
+        return tensor * self.imagenet_std + self.imagenet_mean
+
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         前向传播（重构版）
         
         计算L1重建损失 + 梯度损失 + LPIPS感知损失。
         """
-        # 确保输入在有效范围内
-        pred_f32 = pred.float()
-        target_f32 = target.float()
+        pred_f32 = self._maybe_denormalize(pred.float())
+        target_f32 = self._maybe_denormalize(target.float())
         loss_dict = {}
         # 1. L1重建损失（使用smooth L1以提升稳定性）
         diff = pred_f32 - target_f32
         loss_recon = F.l1_loss(pred_f32, target_f32)
         loss_dict['image_recon_loss'] = loss_recon.item()
         if self.msssim_weight > 0:
-            loss_msssim = self.msssim_loss_fn(pred, target)
+            loss_msssim = self.msssim_loss_fn(pred_f32, target_f32)
         else:
             loss_msssim = torch.tensor(0.0, device=pred.device)
         loss_dict['image_msssim_loss'] = loss_msssim.item()
         # 2. 梯度损失（保留边缘信息）
         if self.grad_weight > 0:
-            pred_h = pred[..., :, 1:] - pred[..., :, :-1]
-            target_h = target[..., :, 1:] - target[..., :, :-1]
+            pred_h = pred_f32[..., :, 1:] - pred_f32[..., :, :-1]
+            target_h = target_f32[..., :, 1:] - target_f32[..., :, :-1]
             loss_grad_h = torch.mean(torch.abs(pred_h - target_h))
-            pred_v = pred[..., 1:, :] - pred[..., :-1, :]
-            target_v = target[..., 1:, :] - target[..., :-1, :]
+            pred_v = pred_f32[..., 1:, :] - pred_f32[..., :-1, :]
+            target_v = target_f32[..., 1:, :] - target_f32[..., :-1, :]
             loss_grad_v = torch.mean(torch.abs(pred_v - target_v))
             loss_grad = loss_grad_h + loss_grad_v
         else:
@@ -518,7 +536,7 @@ class ImageLoss(nn.Module):
         loss_percep = torch.tensor(0.0, device=pred.device)
         if self.percep_loss_fn is not None and self.percep_weight > 0:
             try:
-                loss_percep = self.percep_loss_fn(pred, target)
+                loss_percep = self.percep_loss_fn(pred_f32, target_f32)
                 if torch.isnan(loss_percep) or torch.isinf(loss_percep):
                     loss_percep = torch.tensor(0.0, device=pred.device)
             except Exception as e:
@@ -554,22 +572,38 @@ class VideoLoss(nn.Module):
         perceptual_weight: float = 0.0,  # 默认禁用
         temporal_weight: float = 0.1,
         temporal_consistency_weight: float = 0.0,
-        data_range: float = 1.0
+        temporal_perceptual_weight: float = 0.0,
+        color_consistency_weight: float = 0.0,
+        data_range: float = 1.0,
+        normalize: bool = False,
 
     ):
         super().__init__()
         self.recon_weight = reconstruction_weight
-        self.percep_weight = 0.0  # 强制设为0，不再使用MS-SSIM
+        self.percep_weight = perceptual_weight
         self.temp_weight = temporal_weight
         self.consistency_weight = temporal_consistency_weight
+        self.temporal_perceptual_weight = temporal_perceptual_weight
+        self.color_consistency_weight = color_consistency_weight
         self.data_range = data_range
+        self.normalize = normalize
         #self.epsilon = 1e-6
         
         # 重建损失 (L1)
         self.recon_loss_fn = nn.L1Loss()
         
-        # 感知损失已移除（MS-SSIM占用显存过大）
-        self.percep_loss_fn = None
+        # 感知损失（LPIPS或VGG）
+        if self.percep_weight > 0:
+            self.percep_loss_fn = PerceptualLoss(use_lpips=LPIPS_AVAILABLE)
+        else:
+            self.percep_loss_fn = None
+        self.register_buffer("imagenet_mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1))
+        self.register_buffer("imagenet_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1))
+
+    def _maybe_denormalize(self, tensor: torch.Tensor) -> torch.Tensor:
+        if not self.normalize:
+            return tensor
+        return tensor * self.imagenet_std + self.imagenet_mean
     
     #def _normalize_to_range(self, img: torch.Tensor) -> torch.Tensor:
         """
@@ -603,12 +637,14 @@ class VideoLoss(nn.Module):
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, float]]:
         B, T, C, H, W = pred.shape
         
-        # 归一化预测和目标到 [0, 1] 范围
-        pred_f32 = pred.float()
-        target_f32 = target.float()
+        pred_f32 = self._maybe_denormalize(pred.float())
+        target_f32 = self._maybe_denormalize(target.float())
         loss_recon_avg = F.l1_loss(pred_f32, target_f32)
         loss_temp = torch.tensor(0.0, device=pred.device)
         loss_consistency = torch.tensor(0.0, device=pred.device)
+        loss_percep = torch.tensor(0.0, device=pred.device)
+        loss_temporal_percep = torch.tensor(0.0, device=pred.device)
+        loss_color = torch.tensor(0.0, device=pred.device)
         if pred_f32.size(1) > 1 and self.temp_weight > 0:
             pred_diff = pred_f32[:, 1:] - pred_f32[:, :-1]
             target_diff = target_f32[:, 1:] - target_f32[:, :-1]
@@ -616,15 +652,43 @@ class VideoLoss(nn.Module):
         if pred_f32.size(1) > 1 and self.consistency_weight > 0:
             pred_diff = pred_f32[:, 1:] - pred_f32[:, :-1]
             loss_consistency = pred_diff.abs().mean()
+        if self.percep_loss_fn is not None and self.percep_weight > 0:
+            try:
+                pred_frames = pred_f32.reshape(B * T, C, H, W)
+                target_frames = target_f32.reshape(B * T, C, H, W)
+                loss_percep = self.percep_loss_fn(pred_frames, target_frames)
+            except Exception:
+                loss_percep = torch.tensor(0.0, device=pred.device)
+        if pred_f32.size(1) > 1 and self.temporal_perceptual_weight > 0 and self.percep_loss_fn is not None:
+            try:
+                pred_diff = pred_f32[:, 1:] - pred_f32[:, :-1]
+                target_diff = target_f32[:, 1:] - target_f32[:, :-1]
+                pred_frames = pred_diff.reshape(B * (T - 1), C, H, W)
+                target_frames = target_diff.reshape(B * (T - 1), C, H, W)
+                loss_temporal_percep = self.percep_loss_fn(pred_frames, target_frames)
+            except Exception:
+                loss_temporal_percep = torch.tensor(0.0, device=pred.device)
+        if self.color_consistency_weight > 0:
+            pred_mean = pred_f32.mean(dim=(-2, -1), keepdim=True)
+            target_mean = target_f32.mean(dim=(-2, -1), keepdim=True)
+            pred_std = pred_f32.std(dim=(-2, -1), keepdim=True)
+            target_std = target_f32.std(dim=(-2, -1), keepdim=True)
+            loss_color = F.l1_loss(pred_mean, target_mean) + F.l1_loss(pred_std, target_std)
         total_loss = (
             (self.recon_weight * loss_recon_avg) +
             (self.temp_weight * loss_temp) +
-            (self.consistency_weight * loss_consistency)
+            (self.consistency_weight * loss_consistency) +
+            (self.percep_weight * loss_percep) +
+            (self.temporal_perceptual_weight * loss_temporal_percep) +
+            (self.color_consistency_weight * loss_color)
         )
         return total_loss, {
             'video_recon_loss_l1': loss_recon_avg.item(),
             'video_temporal_loss_l1': loss_temp.item(),
-            'video_temporal_consistency_loss': loss_consistency.item()
+            'video_temporal_consistency_loss': loss_consistency.item(),
+            'video_percep_loss': loss_percep.item(),
+            'video_temporal_percep_loss': loss_temporal_percep.item(),
+            'video_color_consistency_loss': loss_color.item(),
         }
         #diff = pred -target
         #loss_recon_avg= torch.mean(torch.sqrt(diff * diff + self.epsilon))
@@ -741,10 +805,13 @@ class MultimodalLoss(nn.Module):
         reconstruction_weight: float = 1.0,
         perceptual_weight: float = 0.1,
         temporal_weight: float = 0.1,
+        video_perceptual_weight: float = 0.0,
+        temporal_perceptual_weight: float = 0.0,
         text_contrastive_weight: float = 0.1,  # 【新增】文本对比损失权重
         video_text_contrastive_weight: float = 0.05,  # 【新增】视频-文本对比损失权重
         rate_weight: float = 1e-4,  # 【新增】码率/能量约束权重
         temporal_consistency_weight: float = 0.0,  # 【新增】视频时序一致性正则权重
+        color_consistency_weight: float = 0.0,
         discriminator_weight: float = 0.01,  # 【Phase 3】对抗损失权重（默认较小）
         gan_weight: Optional[float] = None,  # 【Phase 6】对抗损失权重（统一命名）
         condition_margin_weight: float = 0.0,
@@ -752,6 +819,7 @@ class MultimodalLoss(nn.Module):
         
         # 假设数据范围是 [0, 1]
         data_range: float = 1.0,
+        normalize: bool = False,
         use_adversarial: bool = False  # 【Phase 3】是否使用对抗训练
     ):
         super().__init__()
@@ -785,15 +853,19 @@ class MultimodalLoss(nn.Module):
         self.image_loss_fn = ImageLoss(
             reconstruction_weight=reconstruction_weight,
             perceptual_weight=perceptual_weight,
-            data_range=data_range
+            data_range=data_range,
+            normalize=normalize,
         )
         
         self.video_loss_fn = VideoLoss(
             reconstruction_weight=reconstruction_weight,
-            perceptual_weight=perceptual_weight,
+            perceptual_weight=video_perceptual_weight,
             temporal_weight=temporal_weight,
             temporal_consistency_weight=temporal_consistency_weight,
-            data_range=data_range
+            temporal_perceptual_weight=temporal_perceptual_weight,
+            color_consistency_weight=color_consistency_weight,
+            data_range=data_range,
+            normalize=normalize,
         )
     
     def forward(
@@ -875,8 +947,7 @@ class MultimodalLoss(nn.Module):
         # --- 图像损失 ---
         if 'image_decoded' in predictions and 'image' in targets:
             try:
-                # 解码器输出已通过 Sigmoid 激活函数保证在 [0, 1] 范围内，无需 clamp
-                # 直接使用解码器输出（移除 clamp 以保持梯度流）
+                # 解码器输出在训练配置下可能已标准化，损失内部会负责还原到[0,1]
                 pred_img = predictions['image_decoded']
                 
                 image_loss, image_loss_comps = self.image_loss_fn(
@@ -897,8 +968,7 @@ class MultimodalLoss(nn.Module):
         # --- 视频损失 ---
         if 'video_decoded' in predictions and 'video' in targets:
             try:
-                # 解码器输出已通过 Sigmoid 激活函数保证在 [0, 1] 范围内，无需 clamp
-                # 直接使用解码器输出（移除 clamp 以保持梯度流）
+                # 解码器输出在训练配置下可能已标准化，损失内部会负责还原到[0,1]
                 pred_vid = predictions['video_decoded']
                 
                 video_loss, video_loss_comps = self.video_loss_fn(

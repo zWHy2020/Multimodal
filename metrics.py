@@ -280,26 +280,22 @@ def _normalize_image_range(
         torch.Tensor: 归一化后的图像
     """
     # 如果使用了 ImageNet 归一化，先反归一化
-    #if imagenet_normalized:
-        #if imagenet_mean is None or imagenet_std is None:
-            # 默认 ImageNet 统计量
-            #imagenet_mean = [0.485, 0.456, 0.406]
-            #imagenet_std = [0.229, 0.224, 0.225]
-        
-        # 转换为张量并移动到正确设备
-        #mean = torch.tensor(imagenet_mean, device=img.device, dtype=img.dtype)
-        #std = torch.tensor(imagenet_std, device=img.device, dtype=img.dtype)
-        
-        # 添加维度以便广播 [1, 3, 1, 1] 或 [1, 1, 3, 1, 1]
-        #if img.dim() == 4:  # [B, C, H, W]
-            #mean = mean.view(1, 3, 1, 1)
-            #std = std.view(1, 3, 1, 1)
-        #elif img.dim() == 5:  # [B, T, C, H, W]
-            #mean = mean.view(1, 1, 3, 1, 1)
-            #std = std.view(1, 1, 3, 1, 1)
-        
-        # 反归一化: x = normalized * std + mean
-        #img = img * std + mean
+    if imagenet_normalized:
+        if imagenet_mean is None or imagenet_std is None:
+            imagenet_mean = [0.485, 0.456, 0.406]
+            imagenet_std = [0.229, 0.224, 0.225]
+
+        mean = torch.tensor(imagenet_mean, device=img.device, dtype=img.dtype)
+        std = torch.tensor(imagenet_std, device=img.device, dtype=img.dtype)
+
+        if img.dim() == 4:  # [B, C, H, W]
+            mean = mean.view(1, 3, 1, 1)
+            std = std.view(1, 3, 1, 1)
+        elif img.dim() == 5:  # [B, T, C, H, W]
+            mean = mean.view(1, 1, 3, 1, 1)
+            std = std.view(1, 1, 3, 1, 1)
+
+        img = img * std + mean
     
     # 自动检测数据范围并归一化到 [0, 1]
     if detect_range:
@@ -362,7 +358,9 @@ def _validate_and_normalize_visual_data(
         pred,
         target_range=target_range,
         detect_range=False,  # 只进行裁剪，不进行动态拉伸
-        imagenet_normalized=False  # 模型输出通常不使用 ImageNet 归一化
+        imagenet_normalized=imagenet_normalized,
+        imagenet_mean=imagenet_mean,
+        imagenet_std=imagenet_std,
     )
     
     # 归一化目标（只进行裁剪，不进行动态范围拉伸）
@@ -426,7 +424,7 @@ def calculate_multimodal_metrics(
                 pred_img,
                 target_img,
                 target_range=(0.0, 1.0),
-                imagenet_normalized=False,
+                imagenet_normalized=imagenet_normalized,
                 imagenet_mean=imagenet_mean,
                 imagenet_std=imagenet_std
             )
