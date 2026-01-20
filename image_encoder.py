@@ -880,7 +880,8 @@ class ImageJSCCEncoder(nn.Module):
         pretrained: bool = False,  # 【Phase 1】是否使用预训练权重
         disable_timm_pretrained: bool = True,  # 策略A：默认禁用timm预训练路径
         freeze_encoder: bool = False,  # 【Phase 1】是否冻结编码器主干（仅训练适配器）
-        pretrained_model_name: str = 'swin_tiny_patch4_window7_224'  # 【Phase 1】预训练模型名称
+        pretrained_model_name: str = 'swin_tiny_patch4_window7_224',  # 【Phase 1】预训练模型名称
+        use_gradient_checkpointing: bool = True,
     ):
         super().__init__()
         self.num_layers = len(depths)
@@ -893,6 +894,7 @@ class ImageJSCCEncoder(nn.Module):
             pretrained = False
         self.pretrained = pretrained and TIMM_AVAILABLE
         self.freeze_encoder = freeze_encoder
+        self.use_gradient_checkpointing = use_gradient_checkpointing
         self.snr_modulators = nn.ModuleList()
         if hasattr(self, 'layers'):
             for i in range(len(self.layers)):
@@ -1109,7 +1111,8 @@ class ImageJSCCEncoder(nn.Module):
             if self.pretrained:
                 x = layer(x)
             else:
-                x, resolution = layer(x, input_resolution=resolution, use_checkpoint=self.training)
+                use_checkpoint = self.use_gradient_checkpointing and self.training
+                x, resolution = layer(x, input_resolution=resolution, use_checkpoint=use_checkpoint)
             if i < len(self.snr_modulators):
                 x = self.snr_modulators[i](x, snr_db)
         x = self.norm(x)
@@ -1191,6 +1194,7 @@ class ImageJSCCDecoder(nn.Module):
         guide_dim: Optional[int] = None,
         semantic_context_dim: int = 256,  # 【修复】添加参数，与 VideoJSCCDecoder 保持一致
         normalize_output: bool = False,
+        use_gradient_checkpointing: bool = True,
     ):
         super().__init__()
         self.num_layers = len(depths)
@@ -1198,6 +1202,7 @@ class ImageJSCCDecoder(nn.Module):
         self.img_size = img_size  # 保存img_size用于output_proj计算
         self.patches_resolution = (img_size[0] // patch_size, img_size[1] // patch_size)
         self.normalize_output = normalize_output
+        self.use_gradient_checkpointing = use_gradient_checkpointing
         self.register_buffer("output_mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1))
         self.register_buffer("output_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1))
         
@@ -1445,7 +1450,8 @@ class ImageJSCCDecoder(nn.Module):
                 x = self.snr_modulators[i](x, snr_db)
             if semantic_context is not None and i < len(self.text_modulators):
                 x = self.text_modulators[i](x, text_global)
-            x, resolution = layer(x, input_resolution=resolution, use_checkpoint=self.training)
+            use_checkpoint = self.use_gradient_checkpointing and self.training
+            x, resolution = layer(x, input_resolution=resolution, use_checkpoint=use_checkpoint)
         # 4. 将融合后的 x 送入Swin解码器 (无需再注入)
         #for layer in self.layers:
             #x = layer(x, use_checkpoint=self.training)
