@@ -37,7 +37,7 @@ class TrainingConfig:
         self.weight_decay = 1e-4
         self.grad_clip_norm = 1.0
         self.gradient_accumulation_steps = 2  # 优化：按比例降低，保持等效批次大小=8*8=64不变
-        self.use_amp = False  # 是否使用混合精度训练（自动混合精度）
+        self.use_amp = True  # 是否使用混合精度训练（自动混合精度）
         
         # 学习率调度
         self.lr_scheduler = 'cosine'  # 'cosine', 'step', 'plateau'

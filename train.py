@@ -800,6 +800,12 @@ def main():
         choices=["contiguous_clip", "uniform", "fixed_start"],
         help='验证视频采样策略',
     )
+    parser.add_argument(
+        '--use-amp',
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help='启用混合精度训练（AMP）',
+    )
     parser.add_argument('--local-rank', type=int, default=None, help='分布式训练的本地进程rank')
     parser.add_argument('--distributed', action='store_true', help='启用分布式训练')
     args = parser.parse_args()
@@ -856,6 +862,8 @@ def main():
         config.video_sampling_strategy = args.video_sampling_strategy
     if args.video_eval_sampling_strategy:
         config.video_eval_sampling_strategy = args.video_eval_sampling_strategy
+    if args.use_amp is not None:
+        config.use_amp = args.use_amp
     if args.train_snr_random:
         config.train_snr_strategy = "random"
         config.train_snr_random = True
@@ -1044,7 +1052,8 @@ def main():
     # 创建混合精度训练的scaler（如果启用）
     scaler = None
     if config.use_amp and config.device.type == "cuda":
-        logger.info("启用混合精度训练（AMP），GradScaler 暂时禁用以排查 NaN。")
+        scaler = torch.cuda.amp.GradScaler()
+        logger.info("启用混合精度训练（AMP），GradScaler 已启用。")
     elif config.use_amp:
         logger.warning("检测到非CUDA设备，已禁用混合精度训练（AMP）。")
     
