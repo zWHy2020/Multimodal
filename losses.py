@@ -914,7 +914,9 @@ class MultimodalLoss(nn.Module):
         if 'text_decoded' in predictions and 'text' in targets:
             try:
                 # 【修复】传递重建图像特征和文本嵌入用于对比损失
-                reconstructed_image_features = predictions.get('image_encoded', None)
+                reconstructed_image_features = predictions.get('image_decoded', None)
+                if reconstructed_image_features is None:
+                    reconstructed_image_features = predictions.get('image_encoded', None)
                 text_embeddings = predictions.get('text_encoded', None)
                 
                 # 如果图像特征是4D [B, C, H, W]，需要提取特征

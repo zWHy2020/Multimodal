@@ -223,6 +223,7 @@ class EvaluationConfig:
         self.video_eval_sampling_strategy = "uniform"
         self.infer_window_len = None
         self.infer_window_stride = None
+        self.infer_window_blend = "uniform"
         self.max_output_frames = None
         
         # 模型参数（用于加载模型时，通常从检查点恢复）
