@@ -284,6 +284,8 @@ def sliding_window_reconstruct(
     accum = torch.zeros_like(video_full, dtype=torch.float32, device=device)
     counts = torch.zeros((total_frames, 1, 1, 1), dtype=torch.float32, device=device)
     path_used = "sliding-window"
+    blend_mode = getattr(config, "infer_window_blend", "uniform")
+    window_weights = build_window_blend_weights(window_len, stride, device, blend_mode)
     for start in range(0, total_frames, stride):
         end = min(start + window_len, total_frames)
         window = video_full[start:end]
@@ -291,6 +293,8 @@ def sliding_window_reconstruct(
         if valid_len < window_len:
             pad_frames = window[-1:].repeat(window_len - valid_len, 1, 1, 1)
             window = torch.cat([window, pad_frames], dim=0)
+        if hasattr(model, "reset_hidden_states"):
+            model.reset_hidden_states()
         reconstructed_window, path_used = reconstruct_video_clip(
             model=model,
             video_clip=window,
@@ -300,11 +304,42 @@ def sliding_window_reconstruct(
             use_amp=use_amp,
         )
         reconstructed_window = reconstructed_window[:valid_len].to(device)
-        accum[start:end] += reconstructed_window
-        counts[start:end] += 1.0
+        weights = window_weights[:valid_len]
+        accum[start:end] += reconstructed_window * weights
+        counts[start:end] += weights
     counts = torch.clamp(counts, min=1.0)
     final_video = accum / counts
     return final_video, path_used
+
+
+def build_window_blend_weights(
+    window_len: int,
+    stride: int,
+    device: torch.device,
+    mode: str,
+) -> torch.Tensor:
+    if window_len <= 0:
+        raise ValueError(f"window_len 必须大于 0，当前为 {window_len}")
+    if stride <= 0:
+        raise ValueError(f"stride 必须大于 0，当前为 {stride}")
+    if mode == "uniform" or stride >= window_len:
+        weights = torch.ones(window_len, dtype=torch.float32, device=device)
+    else:
+        overlap = window_len - stride
+        if overlap <= 0:
+            weights = torch.ones(window_len, dtype=torch.float32, device=device)
+        else:
+            if mode == "cosine":
+                ramp = torch.linspace(0, 1, overlap, device=device)
+                ramp = 0.5 - 0.5 * torch.cos(torch.pi * ramp)
+            elif mode == "linear":
+                ramp = torch.linspace(0, 1, overlap, device=device)
+            else:
+                raise ValueError(f"未知的滑窗融合模式: {mode}")
+            weights = torch.ones(window_len, dtype=torch.float32, device=device)
+            weights[:overlap] = ramp
+            weights[-overlap:] = ramp.flip(0)
+    return weights.view(-1, 1, 1, 1)
 
 
 def register_branch_hooks(model: MultimodalJSCC) -> Tuple[Dict[str, int], List[Any]]:
@@ -1176,6 +1211,13 @@ def main():
     parser.add_argument('--video_fps', type=float, default=10.0, help='视频保存帧率')
     parser.add_argument('--infer-window-len', type=int, default=None, help='滑窗推理window长度')
     parser.add_argument('--infer-window-stride', type=int, default=None, help='滑窗推理stride')
+    parser.add_argument(
+        '--infer-window-blend',
+        type=str,
+        default='uniform',
+        choices=['uniform', 'linear', 'cosine'],
+        help='滑窗重叠区域融合模式'
+    )
     parser.add_argument('--max-output-frames', type=int, default=None, help='推理输出最大帧数（调试用）')
     parser.add_argument(
         '--video-sampling-strategy',
@@ -1231,6 +1273,7 @@ def main():
     config.pretrained_model_name = args.pretrained_model_name
     config.infer_window_len = args.infer_window_len
     config.infer_window_stride = args.infer_window_stride
+    config.infer_window_blend = args.infer_window_blend
     config.max_output_frames = args.max_output_frames
     config.normalize = args.normalize
     if args.use_text_guidance_image:
@@ -1464,8 +1507,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
 
 
 
