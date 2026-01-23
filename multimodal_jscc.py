@@ -376,10 +376,13 @@ class MultimodalJSCC(nn.Module):
             features = self._apply_quantization_noise(features)
             transmitted_features[modality] = self.channel(features)
             results[f'{modality}_transmitted'] = transmitted_features[modality]
-        results['rate_stats'] = {
+        rate_stats = {
             modality: features.pow(2).mean()
             for modality, features in encoded_features.items()
         }
+        if hasattr(self.video_encoder, "last_rate_stats") and self.video_encoder.last_rate_stats:
+            rate_stats.update(self.video_encoder.last_rate_stats)
+        results['rate_stats'] = rate_stats
         
         # 解码阶段 - 语义引导式解码
         decoded_outputs = {}
