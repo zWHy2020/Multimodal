@@ -1,9 +1,9 @@
 """
 视频JSCC编码器和解码器
 
-基于DCVC的视频编码器，修改为JSCC架构。
-移除显式量化和熵编码，支持连续值特征传输。
-包含光流估计、运动补偿、上下文编码等时序模块。
+基于MDVSC的视频语义通信架构：GOP级别潜空间变换、共性/个性特征提取、
+熵模型重要性筛选、轻量JSCC编解码与潜空间逆变换。
+保持接口兼容（类名/方法签名/guide_vectors），便于与多模态框架协作。
 """
 
 import torch
@@ -13,6 +13,7 @@ from typing import Optional, Tuple, List, Dict, Any
 import math
 import logging
 from image_encoder import SNRModulator
+from video_unet import ResBlock
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,275 @@ def _log_nonfinite(name: str, tensor: torch.Tensor) -> bool:
     )
     return True
 
+
+class LatentTransformer(nn.Module):
+    """
+    GOP级别潜空间变换模块
+
+    将输入视频帧压缩到潜空间以便后续JSCC编码。
+    使用轻量卷积+残差块进行空间降采样和特征压缩。
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        latent_dim: int,
+        num_res_blocks: int = 2,
+        downsample_stride: int = 2,
+    ):
+        super().__init__()
+        self.downsample_stride = downsample_stride
+        self.stem = nn.Sequential(
+            nn.Conv2d(in_channels, latent_dim, kernel_size=3, stride=downsample_stride, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.res_blocks = nn.Sequential(
+            *[ResBlock(latent_dim, latent_dim) for _ in range(num_res_blocks)]
+        )
+
+    def forward(self, video_frames: torch.Tensor) -> torch.Tensor:
+        """
+        将视频帧映射到潜空间
+
+        Args:
+            video_frames (torch.Tensor): 输入视频 [B, T, C, H, W]
+
+        Returns:
+            torch.Tensor: 潜空间特征 [B, T, C_latent, H', W']
+        """
+        B, T, C, H, W = video_frames.shape
+        x = video_frames.view(B * T, C, H, W)
+        x = self.stem(x)
+        x = self.res_blocks(x)
+        _, C_latent, H_latent, W_latent = x.shape
+        x = x.view(B, T, C_latent, H_latent, W_latent)
+        return x
+
+
+class JSCCEncoder(nn.Module):
+    """
+    深度JSCC编码器（MDVSC版本）
+
+    使用卷积+残差块提取鲁棒特征，输出用于信道传输的特征图。
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_dim: int,
+        out_channels: int,
+        num_res_blocks: int = 3,
+    ):
+        super().__init__()
+        self.head = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.body = nn.Sequential(
+            *[ResBlock(hidden_dim, hidden_dim) for _ in range(num_res_blocks)]
+        )
+        self.tail = nn.Conv2d(hidden_dim, out_channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.head(x)
+        x = self.body(x)
+        x = self.tail(x)
+        return x
+
+
+class JSCCDecoder(nn.Module):
+    """
+    深度JSCC解码器（MDVSC版本）
+
+    从信道特征恢复潜空间特征，结构为轻量卷积+残差。
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_dim: int,
+        out_channels: int,
+        num_res_blocks: int = 3,
+    ):
+        super().__init__()
+        self.head = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.body = nn.Sequential(
+            *[ResBlock(hidden_dim, hidden_dim) for _ in range(num_res_blocks)]
+        )
+        self.tail = nn.Conv2d(hidden_dim, out_channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.head(x)
+        x = self.body(x)
+        x = self.tail(x)
+        return x
+
+
+class CommonFeatureExtractor(nn.Module):
+    """
+    共性/个性特征提取器（MDVSC）
+
+    将T帧特征拼接后提取共性特征W_c，再得到每帧个性特征W_i = Y_i - W_c。
+    """
+
+    def __init__(self, channels: int, num_frames: int):
+        super().__init__()
+        self.num_frames = num_frames
+        self.common_conv = nn.Sequential(
+            nn.Conv2d(channels * num_frames, channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.residual_proj = nn.Conv2d(channels, channels, kernel_size=1)
+
+    def forward(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        提取共性与个性特征
+
+        Args:
+            features (torch.Tensor): 输入特征 [B, T, C, H, W]
+
+        Returns:
+            Tuple: (W_c, W_i) -> [B, C, H, W], [B, T, C, H, W]
+        """
+        B, T, C, H, W = features.shape
+        concat_features = features.view(B, T * C, H, W)
+        residual = self.residual_proj(features.mean(dim=1))
+        common = self.common_conv(concat_features) + residual
+        individual = features - common.unsqueeze(1)
+        return common, individual
+
+
+class EntropyModel(nn.Module):
+    """
+    熵模型：估计特征重要性并生成掩码
+
+    输入共性特征W_c和个性特征W_i，输出熵/重要性评分。
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        hidden_dim: int = 128,
+        temperature: float = 0.2,
+    ):
+        super().__init__()
+        self.temperature = temperature
+        self.scorer = nn.Sequential(
+            nn.Conv2d(channels * 2, hidden_dim, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_dim, channels, kernel_size=1),
+        )
+
+    def forward(self, common: torch.Tensor, individual: torch.Tensor) -> torch.Tensor:
+        """
+        估计熵分数
+
+        Args:
+            common (torch.Tensor): 共性特征 [B, C, H, W]
+            individual (torch.Tensor): 个性特征 [B, T, C, H, W] 或 [B, C, H, W]
+
+        Returns:
+            torch.Tensor: 熵分数 [B, T, C, H, W] 或 [B, C, H, W]
+        """
+        if individual.dim() == 4:
+            concat = torch.cat([common, individual], dim=1)
+            scores = self.scorer(concat)
+            return scores
+
+        B, T, C, H, W = individual.shape
+        common_rep = common.unsqueeze(1).expand(-1, T, -1, -1, -1)
+        concat = torch.cat([common_rep, individual], dim=2)
+        concat = concat.view(B * T, 2 * C, H, W)
+        scores = self.scorer(concat)
+        scores = scores.view(B, T, C, H, W)
+        return scores
+
+    def build_mask(self, scores: torch.Tensor, target_cbr: float, training: bool) -> torch.Tensor:
+        """
+        根据熵分数构建掩码
+
+        Args:
+            scores (torch.Tensor): 熵分数
+            target_cbr (float): 目标码率比例（保留比例）
+            training (bool): 是否训练模式
+
+        Returns:
+            torch.Tensor: 掩码（与scores同形状）
+        """
+        if target_cbr >= 1.0:
+            return torch.ones_like(scores)
+        if target_cbr <= 0.0:
+            return torch.zeros_like(scores)
+
+        B = scores.shape[0]
+        flat = scores.view(B, -1)
+        quantile = torch.quantile(flat, 1.0 - target_cbr, dim=1)
+        threshold_shape = [B] + [1] * (scores.dim() - 1)
+        threshold = quantile.view(*threshold_shape)
+        hard_mask = (scores >= threshold).float()
+
+        if not training:
+            return hard_mask
+
+        soft_mask = torch.sigmoid((scores - threshold) / self.temperature)
+        # Straight-through估计：前向使用硬掩码，反向使用软掩码梯度
+        mask = hard_mask + soft_mask - soft_mask.detach()
+        return mask
+
+
+class LatentInversion(nn.Module):
+    """
+    潜空间逆变换模块
+
+    将潜空间特征恢复到像素域。
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int = 3,
+        hidden_dim: int = 128,
+        num_res_blocks: int = 2,
+        upsample_stride: int = 2,
+        normalize_output: bool = False,
+    ):
+        super().__init__()
+        self.normalize_output = normalize_output
+        self.head = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.body = nn.Sequential(
+            *[ResBlock(hidden_dim, hidden_dim) for _ in range(num_res_blocks)]
+        )
+        self.upsample = nn.ConvTranspose2d(
+            hidden_dim,
+            hidden_dim,
+            kernel_size=upsample_stride,
+            stride=upsample_stride,
+        )
+        self.tail = nn.Sequential(
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_dim, out_channels, kernel_size=3, padding=1),
+            nn.Tanh(),
+        )
+        self.register_buffer("output_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer("output_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.head(x)
+        x = self.body(x)
+        x = self.upsample(x)
+        x = self.tail(x)
+        x = (x + 1.0) / 2.0
+        if self.normalize_output:
+            x = (x - self.output_mean) / self.output_std
+        return x
 
 class LightweightTemporalConv(nn.Module):
     """
@@ -406,8 +676,8 @@ class VideoJSCCEncoder(nn.Module):
     """
     视频JSCC编码器
     
-    基于DCVC架构的视频编码器，修改为JSCC模式。
-    移除量化和熵编码，支持连续值特征传输。
+    基于MDVSC架构：先做GOP潜空间变换，再进行JSCC编码，
+    之后提取共性/个性特征并用熵模型进行重要性筛选。
     """
     
     def __init__(
@@ -425,84 +695,55 @@ class VideoJSCCEncoder(nn.Module):
         swin_norm: Optional[nn.Module] = None,
         mlp_ratio: float = 4.0,
         use_gradient_checkpointing: bool = True,
+        target_cbr: float = 0.5,
+        entropy_temperature: float = 0.2,
     ):
         super().__init__()
         self.in_channels = in_channels
         self.hidden_dim = hidden_dim
         self.num_frames = num_frames
+        # 兼容参数保留（MDVSC路径不再使用光流/ConvLSTM）
         self.use_optical_flow = use_optical_flow
         self.use_convlstm = use_convlstm
         self.use_gradient_checkpointing = use_gradient_checkpointing
-        
-        # 光流估计
-        if use_optical_flow:
-            self.optical_flow = OpticalFlow(in_channels, hidden_dim)
-            self.motion_compensation = MotionCompensation()
-        
-        # 使用Swin Transformer作为视觉主干网（支持共享注入）
-        if (patch_embed is not None) and (swin_layers is not None) and (swin_norm is not None):
-            self.patch_embed = patch_embed
-            self.swin_layers = swin_layers
-            self.swin_norm = swin_norm
-        else:
-            from image_encoder import PatchEmbed, BasicLayer
-            patches_resolution = (img_size[0] // patch_size, img_size[1] // patch_size)
-            # Patch embedding（非共享路径）
-            self.patch_embed = PatchEmbed(
-                img_size=img_size,  # 假设输入尺寸
-                patch_size=patch_size,
-                in_chans=in_channels,
-                embed_dim=hidden_dim
-            )
-            # Swin Transformer层（非共享路径）
-            self.swin_layers = nn.ModuleList([
-                BasicLayer(
-                    dim=hidden_dim,
-                    out_dim=hidden_dim,
-                    input_resolution=patches_resolution,  # 224/4 = 56
-                    depth=2,
-                    num_heads=8,
-                    window_size=4,
-                    mlp_ratio=mlp_ratio,  # 修复OOM：从4.0减小到2.0以节省显存
-                    qkv_bias=True,
-                    drop=0.0,
-                    attn_drop=0.0,
-                    drop_path=0.1,
-                    norm_layer=nn.LayerNorm,
-                    downsample=None
-                )
-            ])
-            self.swin_norm = nn.LayerNorm(hidden_dim)
-        
-        # 特征重塑层
-        self.feature_reshape = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1)
-        self.snr_modulator = SNRModulator(hidden_dim)
-        
-        # ConvLSTM 时序建模
-        if use_convlstm:
-            self.temporal_layer = ConvLSTM(
-                input_dim=hidden_dim,
-                hidden_dim=hidden_dim,
-                kernel_size=3,
-            )
-            self.hidden_state = None
-        
-        # 输出投影
-        self.output_proj = nn.Sequential(
-            nn.Conv2d(hidden_dim, hidden_dim // 2, kernel_size=1),
-            nn.ReLU(),
-            nn.Conv2d(hidden_dim // 2, output_dim, kernel_size=1)
+        self.target_cbr = target_cbr
+
+        # GOP级别潜空间变换（替代Swin）
+        self.latent_transformer = LatentTransformer(
+            in_channels=in_channels,
+            latent_dim=hidden_dim,
+            num_res_blocks=2,
+            downsample_stride=2,
         )
-        
-        # 引导向量提取器
+
+        # JSCC深度编码器
+        self.jscc_encoder = JSCCEncoder(
+            in_channels=hidden_dim,
+            hidden_dim=hidden_dim,
+            out_channels=output_dim,
+            num_res_blocks=3,
+        )
+        self.snr_modulator = SNRModulator(output_dim)
+
+        # 共性/个性特征提取
+        self.common_extractor = CommonFeatureExtractor(output_dim, num_frames)
+
+        # 熵模型估计特征重要性
+        self.entropy_model = EntropyModel(
+            channels=output_dim,
+            hidden_dim=max(64, output_dim // 2),
+            temperature=entropy_temperature,
+        )
+
+        # 引导向量提取器（使用个性特征W_i）
         self.guide_extractor = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Linear(hidden_dim, hidden_dim // 4)
+            nn.Linear(output_dim, output_dim // 4),
         )
-        
-        # 初始化隐藏状态
-        self.hidden_state = None
+
+        # 记录码率信息
+        self.last_rate_stats: Dict[str, torch.Tensor] = {}
     
     def forward(
         self,
@@ -511,7 +752,7 @@ class VideoJSCCEncoder(nn.Module):
         snr_db: float = 10.0
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        视频编码器前向传播 - 特征空间运动补偿
+        视频编码器前向传播（MDVSC）
         
         Args:
             video_frames (torch.Tensor): 视频帧 [B, T, C, H, W]
@@ -522,195 +763,56 @@ class VideoJSCCEncoder(nn.Module):
         """
         B, T, C, H, W = video_frames.shape
         self.last_input_size = (H, W)
-        
-        if reset_state or self.hidden_state is None:
-            self.hidden_state = None
-        
-        encoded_features = []
-        guide_vectors = []
-        prev_feature = None  # 前一帧的特征
-        prev_frame = None   # 前一帧的像素
-        
-        for t in range(T):
-            current_frame = video_frames[:, t, :, :, :]
-            
-            # 使用Swin Transformer提取当前帧特征
-            current_feature = self._extract_swin_features(current_frame)
-            current_feature = self.snr_modulator(current_feature, snr_db)
-            
-            # 特征空间运动补偿
-            if self.use_optical_flow and t > 0 and prev_feature is not None:
-                # 在像素空间估计光流
-                flow = self.optical_flow(prev_frame, current_frame)
-                
-                # 将像素空间光流对齐到特征空间尺寸，并按比例缩放位移
-                feat_h, feat_w = prev_feature.shape[-2], prev_feature.shape[-1]
-                img_h, img_w = current_frame.shape[-2], current_frame.shape[-1]
-                flow_downsampled = F.interpolate(flow, size=(feat_h, feat_w), mode='bilinear', align_corners=False)
-                scale_w = float(feat_w) / float(img_w)
-                scale_h = float(feat_h) / float(img_h)
-                flow_rescaled = torch.zeros_like(flow_downsampled)
-                flow_rescaled[:, 0] = flow_downsampled[:, 0] * scale_w
-                flow_rescaled[:, 1] = flow_downsampled[:, 1] * scale_h
-                
-                # 使用重标定后的光流扭曲前一帧特征
-                warped_feature = self._warp_features(prev_feature, flow_rescaled)
-                
-                # 计算特征残差
-                feature_residual = current_feature - warped_feature
-                
-                # ConvLSTM 时序建模
-                if self.use_convlstm:
-                    feature_residual, self.hidden_state = self.temporal_layer(
-                        feature_residual, self.hidden_state
-                    )
-                feature_residual = self.snr_modulator(feature_residual, snr_db)
-                
-                # 输出投影
-                encoded_frame = self.output_proj(feature_residual)
-                encoded_features.append(encoded_frame)
-                
-                # 提取引导向量
-                guide_vector = self.guide_extractor(feature_residual)
-                guide_vectors.append(guide_vector)
-                
-                # 更新前一帧特征（用于下一帧）
-                prev_feature = current_feature
-            else:
-                # 第一帧或没有光流
-                if self.use_convlstm:
-                    current_feature, self.hidden_state = self.temporal_layer(
-                        current_feature, self.hidden_state
-                    )
-                current_feature = self.snr_modulator(current_feature, snr_db)
-                
-                # 输出投影
-                encoded_frame = self.output_proj(current_feature)
-                encoded_features.append(encoded_frame)
-                
-                # 提取引导向量
-                guide_vector = self.guide_extractor(current_feature)
-                guide_vectors.append(guide_vector)
-                
-                # 更新前一帧特征
-                prev_feature = current_feature
-            
-            # 更新前一帧像素（用于光流估计）
-            if self.use_optical_flow:
-                prev_frame = current_frame
-        
-        # 堆叠所有帧的特征
-        encoded_features = torch.stack(encoded_features, dim=1)  # [B, T, C, H, W]
-        guide_vectors = torch.stack(guide_vectors, dim=1)  # [B, T, guide_dim]
+
+        # 1) GOP潜空间变换
+        latent_features = self.latent_transformer(video_frames)  # [B, T, C_latent, H', W']
+
+        # 2) JSCC编码（逐帧）
+        latent_flat = latent_features.view(B * T, latent_features.size(2), latent_features.size(3), latent_features.size(4))
+        jscc_features = self.jscc_encoder(latent_flat)
+        jscc_features = self.snr_modulator(jscc_features, snr_db)
+        jscc_features = jscc_features.view(B, T, jscc_features.size(1), jscc_features.size(2), jscc_features.size(3))
+
+        # 3) 提取共性/个性特征
+        common_feature, individual_features = self.common_extractor(jscc_features)
+
+        # 4) 熵模型筛选特征
+        entropy_scores = self.entropy_model(common_feature, individual_features)
+        entropy_mask = self.entropy_model.build_mask(
+            entropy_scores, target_cbr=self.target_cbr, training=self.training
+        )
+        common_feature = common_feature * entropy_mask.mean(dim=1)
+        individual_features = individual_features * entropy_mask
+
+        # 5) 引导向量来自个性特征
+        guide_vectors = self.guide_extractor(
+            individual_features.view(B * T, individual_features.size(2), individual_features.size(3), individual_features.size(4))
+        ).view(B, T, -1)
+
+        # 6) 输出：将W_c作为额外帧拼接在前
+        encoded_features = torch.cat([common_feature.unsqueeze(1), individual_features], dim=1)
+
+        # 码率统计（用于loss）
+        self.last_rate_stats = {
+            "video_mask_mean": entropy_mask.mean(),
+        }
+
         _log_nonfinite("VideoJSCCEncoder.encoded_features", encoded_features)
         _log_nonfinite("VideoJSCCEncoder.guide_vectors", guide_vectors)
 
         return encoded_features, guide_vectors
     
-    def _warp_features(self, features: torch.Tensor, flow: torch.Tensor) -> torch.Tensor:
-        """
-        使用光流扭曲特征
-        
-        Args:
-            features (torch.Tensor): 特征 [B, C, H, W]
-            flow (torch.Tensor): 光流 [B, 2, H, W]
-            
-        Returns:
-            torch.Tensor: 扭曲后的特征
-        """
-        B, C, H, W = features.shape
-        
-        # 创建网格
-        grid_y, grid_x = torch.meshgrid(
-            torch.arange(H, device=features.device),
-            torch.arange(W, device=features.device),
-            indexing='ij'
-        )
-        grid = torch.stack([grid_x, grid_y], dim=0).float()
-        grid = grid.unsqueeze(0).expand(B, -1, -1, -1)
-        
-        # 应用光流
-        flow_grid = grid + flow
-        
-        # 归一化到[-1, 1]
-        flow_grid[:, 0, :, :] = 2.0 * flow_grid[:, 0, :, :] / max(W - 1, 1) - 1.0
-        flow_grid[:, 1, :, :] = 2.0 * flow_grid[:, 1, :, :] / max(H - 1, 1) - 1.0
-        
-        # 重排列为grid_sample格式
-        flow_grid = flow_grid.permute(0, 2, 3, 1)
-        
-        # 双线性插值
-        warped_features = F.grid_sample(
-            features, flow_grid, mode='bilinear', padding_mode='border', align_corners=True
-        )
-        
-        return warped_features
-    
-    def _extract_swin_features(self, frame: torch.Tensor) -> torch.Tensor:
-        """
-        使用Swin Transformer提取帧特征
-        
-        Args:
-            frame (torch.Tensor): 输入帧 [B, C, H, W]
-            
-        Returns:
-            torch.Tensor: 提取的特征 [B, hidden_dim, H', W']
-        """
-        B, C, H, W = frame.shape
-        
-        # Patch embedding
-        x = self.patch_embed(frame)  # [B, num_patches, hidden_dim]
-        patch_resolution = getattr(self.patch_embed, "grid_size", None)
-        if patch_resolution is None:
-            patch_resolution = (
-                frame.shape[-2] // self.patch_embed.patch_size,
-                frame.shape[-1] // self.patch_embed.patch_size,
-            )
-        self.last_pad = getattr(self.patch_embed, "last_pad", (0, 0))
-        self.last_patch_resolution = patch_resolution
-        
-        # 通过Swin Transformer层（鲁棒：若维度不兼容则跳过Swin层）
-        #try:
-        resolution = patch_resolution
-        for layer in self.swin_layers:
-            use_checkpoint = self.use_gradient_checkpointing and self.training
-            x, resolution = layer(x, input_resolution=resolution, use_checkpoint=use_checkpoint)
-        self.last_latent_resolution = resolution
-        #except Exception as e:
-            #print(f"[Warn] VideoJSCCEncoder.swin_layers 失败，启用简化路径: {e}; x.shape={tuple(x.shape)}")
-        
-        # 层归一化
-        if hasattr(self, 'swin_norm') and self.swin_norm is not None:
-            try:
-                x = self.swin_norm(x)
-            except Exception as e:
-                print(f"[Warn] VideoJSCCEncoder.swin_norm 失败（忽略）: {e}; x.shape={tuple(x.shape)}")
-        
-        # 重塑为特征图格式
-        num_patches = x.shape[1]
-        #patch_size = int(num_patches ** 0.5)
-        #x = x.view(B, patch_size, patch_size, -1).permute(0, 3, 1, 2)  # [B, hidden_dim, H', W']
-        feat_h, feat_w = resolution
-        if num_patches != feat_h * feat_w:
-            raise RuntimeError(
-                f"特征序列长度 {num_patches} 与计算出的网格 {feat_h}x{feat_w} 不匹配"
-            )
-        x = x.view(B, feat_h, feat_w, -1).permute(0, 3, 1, 2)
-        # 特征重塑
-        x = self.feature_reshape(x)
-        
-        return x
-    
     def reset_hidden_state(self):
         """重置隐藏状态"""
-        self.hidden_state = None
+        return None
 
 
 class VideoJSCCDecoder(nn.Module):
     """
     视频JSCC解码器
     
-    从经过信道传输的带噪特征重建原始视频序列。
+    MDVSC接收端：组合共性/个性特征恢复Y_i，
+    通过轻量JSCC解码与潜空间逆变换重建视频帧。
     """
     
     def __init__(
@@ -734,6 +836,7 @@ class VideoJSCCDecoder(nn.Module):
         self.out_channels = out_channels
         self.hidden_dim = hidden_dim
         self.num_frames = num_frames
+        # 兼容参数保留（MDVSC路径不再使用光流/ConvLSTM）
         self.use_optical_flow = use_optical_flow
         self.use_convlstm = use_convlstm
         self.img_size = img_size
@@ -743,101 +846,24 @@ class VideoJSCCDecoder(nn.Module):
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.register_buffer("output_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
         self.register_buffer("output_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
-        self.patches_resolution = (img_size[0] // patch_size, img_size[1] // patch_size)  # (56, 56)
-        
-        # 输入投影
-        self.input_proj = nn.Sequential(
-            nn.Conv2d(input_dim, hidden_dim // 2, kernel_size=1),
-            nn.ReLU(),
-            nn.Conv2d(hidden_dim // 2, hidden_dim, kernel_size=1)
+
+        # JSCC解码器（MDVSC）
+        self.jscc_decoder = JSCCDecoder(
+            in_channels=input_dim,
+            hidden_dim=hidden_dim,
+            out_channels=hidden_dim,
+            num_res_blocks=3,
         )
-        
-        # 使用Swin Transformer作为视觉主干网
-        from image_encoder import BasicLayer, PatchReverseMerging
-        
-        # 特征重塑层
-        self.feature_reshape = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1)
-        
-        # Swin Transformer层 - 添加上采样机制
-        # 参考 ImageJSCCDecoder 的设计，使用多层 BasicLayer + PatchReverseMerging 逐步上采样
-        # 从 56×56 -> 112×112 -> 224×224
-        self.swin_layers = nn.ModuleList([
-            # 第一层：处理 56×56 特征，输出仍为 56×56
-            BasicLayer(
-                dim=hidden_dim,
-                out_dim=hidden_dim,
-                input_resolution=self.patches_resolution,  # (56, 56)
-                depth=2,
-                num_heads=8,
-                window_size=4,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=True,
-                drop=0.0,
-                attn_drop=0.0,
-                drop_path=0.1,
-                norm_layer=nn.LayerNorm,
-                downsample=None  # 第一层不进行上采样
-            ),
-            # 第二层：上采样到 112×112
-            BasicLayer(
-                dim=hidden_dim,
-                out_dim=hidden_dim,  # 保持维度不变
-                input_resolution=self.patches_resolution,  # (56, 56) - 输入
-                depth=2,
-                num_heads=8,
-                window_size=4,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=True,
-                drop=0.0,
-                attn_drop=0.0,
-                drop_path=0.1,
-                norm_layer=nn.LayerNorm,
-                downsample=PatchReverseMerging  # 上采样：56×56 -> 112×112 (序列长度变为4倍)
-            ),
-            # 第三层：上采样到 224×224
-            BasicLayer(
-                dim=hidden_dim,
-                out_dim=hidden_dim,  # 保持维度不变
-                input_resolution=(self.patches_resolution[0] * 2, self.patches_resolution[1] * 2),  # (112, 112) - 输入
-                depth=2,
-                num_heads=8,
-                window_size=4,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=True,
-                drop=0.0,
-                attn_drop=0.0,
-                drop_path=0.1,
-                norm_layer=nn.LayerNorm,
-                downsample=PatchReverseMerging  # 上采样：112×112 -> 224×224 (序列长度变为4倍)
-            )
-        ])
-        
-        # 输出投影：使用 Conv2d 进行通道映射（因为上采样已在 Swin 层完成）
-        # 由于 PatchReverseMerging 已经上采样到 224×224，这里仅进行通道映射
-        self.output_proj = nn.Sequential(
-            nn.Conv2d(hidden_dim, out_channels, kernel_size=1),
-            nn.Tanh()
+
+        # 潜空间逆变换（恢复像素）
+        self.latent_inversion = LatentInversion(
+            in_channels=hidden_dim,
+            out_channels=out_channels,
+            hidden_dim=hidden_dim // 2,
+            num_res_blocks=2,
+            upsample_stride=2,
+            normalize_output=normalize_output,
         )
-        
-        # ConvLSTM 时序建模
-        if use_convlstm:
-            self.temporal_layer = ConvLSTM(
-                input_dim=hidden_dim,
-                hidden_dim=hidden_dim,
-                kernel_size=3,
-            )
-            self.hidden_state = None
-        
-        # 光流估计（用于解码端）
-        if use_optical_flow:
-            self.optical_flow = OpticalFlow(out_channels, hidden_dim)
-            self.motion_compensation = MotionCompensation()
-            # 为像素域近似重建提供轻量级解码器，用于光流估计的当前帧输入
-            self.contextual_decoder = ContextualDecoder(
-                in_channels=hidden_dim,
-                out_channels=out_channels,
-                hidden_dim=hidden_dim
-            )
         
         # 引导向量处理器
         self.guide_processor = nn.Sequential(
@@ -862,8 +888,7 @@ class VideoJSCCDecoder(nn.Module):
             dropout=0.0  # 可以使用dropout，这里设为0保持与原有实现一致
         )
         
-        # 初始化隐藏状态
-        self.hidden_state = None
+        # 记录最近的语义注意力统计
         self.last_semantic_gate_stats: Dict[str, Optional[float]] = {"mean": None, "std": None}
     
     def forward(
@@ -875,10 +900,10 @@ class VideoJSCCDecoder(nn.Module):
         output_size: Optional[Tuple[int, int]] = None,
     ) -> torch.Tensor:
         """
-        视频解码器前向传播 - 特征空间运动补偿
+        视频解码器前向传播（MDVSC接收端）
         
         Args:
-            noisy_features (torch.Tensor): 带噪特征 [B, T, C, H, W]
+            noisy_features (torch.Tensor): 带噪特征 [B, T(+1), C, H, W]
             guide_vectors (torch.Tensor): 引导向量 [B, T, guide_dim]
             reset_state (bool): 是否重置隐藏状态
             semantic_context (torch.Tensor, optional): 语义上下文 [B, seq_len, D_text]
@@ -887,219 +912,72 @@ class VideoJSCCDecoder(nn.Module):
             torch.Tensor: 重建视频 [B, T, C, H, W]
         """
         B, T, C, H, W = noisy_features.shape
-        
-        if reset_state or self.hidden_state is None:
-            self.hidden_state = None
-        
-        decoded_frames = []
-        prev_reconstructed_feature = None  # 前一帧重建的特征
-        prev_decoded_frame = None         # 前一帧重建的像素
-        device = noisy_features.device  # 保存设备信息，用于后续将CPU上的帧移回GPU
-        
-        for t in range(T):
-            current_features = noisy_features[:, t, :, :, :]
-            current_guide = guide_vectors[:, t, :]
-            
-            # 输入投影
-            projected_features = self.input_proj(current_features)
-            del current_features  # 及时释放
-            
-            # 处理引导向量
+
+        # 1) 分离共性/个性特征
+        if T == self.num_frames + 1:
+            common_feature = noisy_features[:, 0]
+            individual_features = noisy_features[:, 1:]
+        else:
+            # 兼容旧接口：若没有W_c，视为全个性特征
+            common_feature = torch.zeros_like(noisy_features[:, 0])
+            individual_features = noisy_features
+
+        T_individual = individual_features.size(1)
+
+        # 2) 还原每帧特征 Y_i = W_c + W_i
+        reconstructed_features = individual_features + common_feature.unsqueeze(1)
+
+        # 3) 融合引导向量与语义上下文
+        enhanced_features = []
+        for t in range(T_individual):
+            current_feature = reconstructed_features[:, t]
+            current_guide = guide_vectors[:, t]
             guide_processed = self.guide_processor(current_guide)
             guide_expanded = guide_processed.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, H, W)
-            del current_guide, guide_processed  # 及时释放
-            
-            # 【重构】提前应用语义引导（在convlstm之前，与guide_expanded一起融合）
+            current_feature = current_feature + guide_expanded
             if semantic_context is not None:
-                # 应用语义引导的交叉注意力
-                projected_features = self._apply_semantic_guidance(
-                    projected_features, semantic_context
-                )
-                # 融合所有信息：特征 + 自身引导 + 语义引导
-                projected_features = projected_features + guide_expanded
-            else:
-                # 仅融合自身引导
-                projected_features = projected_features + guide_expanded
-            del guide_expanded  # 及时释放
-            
-            # ConvLSTM 时序建模
-            # 注意：语义引导已在convlstm之前应用，确保所有时序和语义信息在进入convlstm之前都已就位
-            if self.use_convlstm:
-                projected_features, self.hidden_state = self.temporal_layer(
-                    projected_features, self.hidden_state
-                )
-            
-            # 特征空间运动补偿
-            if self.use_optical_flow and t > 0 and prev_reconstructed_feature is not None:
-                # 估计光流（在像素空间）
-                # 优化：先解码 projected_features 得到预览帧用于光流估计
-                preliminary_current_frame = self._decode_swin_features(
-                    projected_features, output_size=output_size
-                )
-                flow = self.optical_flow(prev_decoded_frame, preliminary_current_frame)
-                
-                # 将像素空间光流对齐到特征空间尺寸，并按比例缩放位移
-                feat_h, feat_w = prev_reconstructed_feature.shape[-2], prev_reconstructed_feature.shape[-1]
-                img_h, img_w = prev_decoded_frame.shape[-2], prev_decoded_frame.shape[-1]
-                flow_downsampled = F.interpolate(flow, size=(feat_h, feat_w), mode='bilinear', align_corners=False)
-                del flow  # 及时释放
-                
-                scale_w = float(feat_w) / float(img_w)
-                scale_h = float(feat_h) / float(img_h)
-                flow_rescaled = torch.zeros_like(flow_downsampled)
-                flow_rescaled[:, 0] = flow_downsampled[:, 0] * scale_w
-                flow_rescaled[:, 1] = flow_downsampled[:, 1] * scale_h
-                del flow_downsampled  # 及时释放
-                
-                # 扭曲前一帧特征
-                warped_prev_feature = self._warp_features(prev_reconstructed_feature, flow_rescaled)
-                del flow_rescaled  # 及时释放
-                
-                # 特征残差解码
-                current_reconstructed_feature = warped_prev_feature + projected_features
-                del warped_prev_feature  # 及时释放
-                
-                # 优化：复用已解码的 preview_current_frame，避免重复解码
-                # 如果运动补偿后的特征与原始 projected_features 差异很小，说明运动补偿效果不明显
-                # 此时可以复用预览帧，避免重复解码，显著提升效率
-                feature_diff = torch.mean((current_reconstructed_feature - projected_features).abs())
-                if feature_diff < 0.05:  # 特征差异阈值：如果差异很小，复用预览帧（节省一次完整解码）
-                    decoded_frame = preliminary_current_frame
-                    # 注意：如果复用预览帧，current_reconstructed_feature 仍然需要保留用于状态更新
-                    # 但我们可以使用 projected_features 作为近似（因为差异很小）
-                    current_reconstructed_feature = projected_features  # 使用近似值
-                    del preliminary_current_frame  # 释放预览帧
-                else:
-                    # 差异较大，说明运动补偿有明显效果，需要重新解码以保持精度
-                    del preliminary_current_frame  # 释放预览帧
-                    decoded_frame = self._decode_swin_features(
-                        current_reconstructed_feature, output_size=output_size
-                    )
-            else:
-                # 第一帧或没有光流：直接解码
-                current_reconstructed_feature = projected_features
-                decoded_frame = self._decode_swin_features(
-                    current_reconstructed_feature, output_size=output_size
-                )
-            
-            # 修复OOM：将解码帧移到CPU，最后再移回GPU（减少GPU峰值内存）
-            # 保存解码帧（先移到CPU以节省GPU内存）
-            if self.training:
-                # 在移到CPU之前，先更新状态（如果需要）
-                if t < T - 1:  # 不是最后一帧，需要保留状态
-                    prev_reconstructed_feature = current_reconstructed_feature.detach().clone()  # 使用detach避免梯度累积
-                    prev_decoded_frame = decoded_frame.detach().clone()  # 在移到CPU前克隆GPU上的帧
-                # 移到CPU并释放GPU上的帧
-                decoded_frames.append(decoded_frame.cpu())
-                del decoded_frame  # 释放GPU上的帧
-            else:
-                # 推理时保持在GPU上
-                if t < T - 1:  # 不是最后一帧，需要保留状态
-                    prev_reconstructed_feature = current_reconstructed_feature.detach().clone()
-                    prev_decoded_frame = decoded_frame.detach().clone()
-                decoded_frames.append(decoded_frame)
-            
-        # 堆叠所有帧
-        # 修复OOM：如果帧在CPU上，先移回GPU再堆叠
-        if self.training and len(decoded_frames) > 0 and decoded_frames[0].device.type == 'cpu':
-            # 将CPU上的帧移回GPU
-            decoded_frames_gpu = [frame.to(device) for frame in decoded_frames]
-            decoded_video = torch.stack(decoded_frames_gpu, dim=1)  # [B, T, C, H, W]
-            del decoded_frames, decoded_frames_gpu  # 释放列表
-        else:
-            decoded_video = torch.stack(decoded_frames, dim=1)  # [B, T, C, H, W]
-            del decoded_frames  # 释放列表
-        
-        return decoded_video
-    
-    def _warp_features(self, features: torch.Tensor, flow: torch.Tensor) -> torch.Tensor:
-        """
-        使用光流扭曲特征
-        
-        Args:
-            features (torch.Tensor): 特征 [B, C, H, W]
-            flow (torch.Tensor): 光流 [B, 2, H, W]
-            
-        Returns:
-            torch.Tensor: 扭曲后的特征
-        """
-        B, C, H, W = features.shape
-        
-        # 创建网格
-        grid_y, grid_x = torch.meshgrid(
-            torch.arange(H, device=features.device),
-            torch.arange(W, device=features.device),
-            indexing='ij'
+                current_feature = self._apply_semantic_guidance(current_feature, semantic_context)
+            enhanced_features.append(current_feature)
+
+        enhanced_features = torch.stack(enhanced_features, dim=1)
+        enhanced_flat = enhanced_features.view(
+            B * T_individual,
+            enhanced_features.size(2),
+            enhanced_features.size(3),
+            enhanced_features.size(4),
         )
-        grid = torch.stack([grid_x, grid_y], dim=0).float()
-        grid = grid.unsqueeze(0).expand(B, -1, -1, -1)
-        
-        # 应用光流
-        flow_grid = grid + flow
-        
-        # 归一化到[-1, 1]
-        flow_grid[:, 0, :, :] = 2.0 * flow_grid[:, 0, :, :] / max(W - 1, 1) - 1.0
-        flow_grid[:, 1, :, :] = 2.0 * flow_grid[:, 1, :, :] / max(H - 1, 1) - 1.0
-        
-        # 重排列为grid_sample格式
-        flow_grid = flow_grid.permute(0, 2, 3, 1)
-        
-        # 双线性插值
-        warped_features = F.grid_sample(
-            features, flow_grid, mode='bilinear', padding_mode='border', align_corners=True
+
+        # 4) JSCC解码 -> 潜空间
+        decoded_latent = self.jscc_decoder(enhanced_flat)
+        decoded_latent = decoded_latent.view(
+            B,
+            T_individual,
+            decoded_latent.size(1),
+            decoded_latent.size(2),
+            decoded_latent.size(3),
         )
-        
-        return warped_features
-    
-    def _decode_swin_features(
-        self,
-        features: torch.Tensor,
-        output_size: Optional[Tuple[int, int]] = None,
-    ) -> torch.Tensor:
-        """
-        使用Swin Transformer解码特征
-        
-        Args:
-            features (torch.Tensor): 输入特征 [B, hidden_dim, H, W]
-            
-        Returns:
-            torch.Tensor: 解码的帧 [B, out_channels, H', W']
-        """
-        B, C, H, W = features.shape
-        
-        # 特征重塑
-        x = self.feature_reshape(features)
-        
-        # 重塑为序列格式
-        x = x.view(B, C, -1).transpose(1, 2)  # [B, H*W, C]
-        
-        # 通过Swin Transformer层（包含上采样）
-        resolution = (H, W)
-        for i, layer in enumerate(self.swin_layers):
-            use_checkpoint = self.use_gradient_checkpointing and self.training
-            x, resolution = layer(x, input_resolution=resolution, use_checkpoint=use_checkpoint)
-        
-        # 重塑为特征图格式
-        # 经过 PatchReverseMerging 上采样后，特征图尺寸应为原始图像的尺寸
-        # 例如：从 56×56 -> 112×112 -> 224×224
-        num_patches = x.shape[1]
-        h, w = resolution
-        if num_patches != h * w:
-            raise RuntimeError(
-                "VideoJSCCDecoder上采样维度不匹配："
-                f"num_patches={num_patches}, resolution={resolution}, h*w={h*w}。"
+
+        # 5) 潜空间逆变换 -> 像素
+        decoded_frames = self.latent_inversion(
+            decoded_latent.view(
+                B * T_individual,
+                decoded_latent.size(2),
+                decoded_latent.size(3),
+                decoded_latent.size(4),
             )
-        x = x.view(B, h, w, -1).permute(0, 3, 1, 2)  # [B, hidden_dim, H', W']
-        
-        # 输出投影（通道映射 + Tanh）
-        x = self.output_proj(x)
-        x = (x + 1.0) / 2.0
-        if self.normalize_output:
-            x = (x - self.output_mean) / self.output_std
+        )
+        decoded_frames = decoded_frames.view(
+            B,
+            T_individual,
+            decoded_frames.size(1),
+            decoded_frames.size(2),
+            decoded_frames.size(3),
+        )
+
         if output_size is not None:
-            x = x[..., : output_size[0], : output_size[1]]
-        
-        return x
+            decoded_frames = decoded_frames[..., : output_size[0], : output_size[1]]
+
+        return decoded_frames
     
     def _apply_semantic_guidance(
         self, 
@@ -1166,4 +1044,4 @@ class VideoJSCCDecoder(nn.Module):
     
     def reset_hidden_state(self):
         """重置隐藏状态"""
-        self.hidden_state = None
+        return None
