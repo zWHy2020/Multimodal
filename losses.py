@@ -559,6 +559,53 @@ class ImageLoss(nn.Module):
         return total_loss, loss_dict
           
 
+class GenerativeImageLoss(nn.Module):
+    """
+    生成式图像损失
+
+    使用 GenerativeJSCC 核心形式: gamma1 * MSE + gamma2 * LPIPS
+    """
+
+    def __init__(
+        self,
+        gamma1: float = 1.0,
+        gamma2: float = 0.1,
+        normalize: bool = False,
+    ):
+        super().__init__()
+        self.gamma1 = gamma1
+        self.gamma2 = gamma2
+        self.normalize = normalize
+        self.register_buffer("imagenet_mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1))
+        self.register_buffer("imagenet_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1))
+        self.percep_loss_fn = PerceptualLoss(use_lpips=LPIPS_AVAILABLE) if gamma2 > 0 else None
+
+    def _maybe_denormalize(self, tensor: torch.Tensor) -> torch.Tensor:
+        if not self.normalize:
+            return tensor
+        return tensor * self.imagenet_std + self.imagenet_mean
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, float]]:
+        pred_f32 = self._maybe_denormalize(pred.float())
+        target_f32 = self._maybe_denormalize(target.float())
+        loss_mse = F.mse_loss(pred_f32, target_f32)
+        loss_lpips = torch.tensor(0.0, device=pred.device)
+        if self.percep_loss_fn is not None and self.gamma2 > 0:
+            try:
+                loss_lpips = self.percep_loss_fn(pred_f32, target_f32)
+                if torch.isnan(loss_lpips) or torch.isinf(loss_lpips):
+                    loss_lpips = torch.tensor(0.0, device=pred.device)
+            except Exception:
+                loss_lpips = torch.tensor(0.0, device=pred.device)
+        total = self.gamma1 * loss_mse + self.gamma2 * loss_lpips
+        if torch.isnan(total) or torch.isinf(total):
+            total = torch.tensor(0.0, device=pred.device)
+        return total, {
+            "image_mse": loss_mse.item(),
+            "image_lpips": loss_lpips.item(),
+            "image_total": total.item(),
+        }
+
 
 class VideoLoss(nn.Module):
     """
@@ -800,6 +847,7 @@ class MultimodalLoss(nn.Module):
         text_weight: float = 1.0,
         image_weight: float = 1.0,
         video_weight: float = 1.0,
+        image_decoder_type: str = "baseline",
         
         # 图像/视频损失的子权重
         reconstruction_weight: float = 1.0,
@@ -816,6 +864,8 @@ class MultimodalLoss(nn.Module):
         gan_weight: Optional[float] = None,  # 【Phase 6】对抗损失权重（统一命名）
         condition_margin_weight: float = 0.0,
         condition_margin: float = 0.05,
+        generative_gamma1: float = 1.0,
+        generative_gamma2: float = 0.1,
         
         # 假设数据范围是 [0, 1]
         data_range: float = 1.0,
@@ -827,6 +877,7 @@ class MultimodalLoss(nn.Module):
         self.text_weight = text_weight
         self.image_weight = image_weight
         self.video_weight = video_weight
+        self.image_decoder_type = image_decoder_type
         
         # 【新增】文本对比损失权重
         self.text_contrastive_weight = text_contrastive_weight
@@ -850,12 +901,19 @@ class MultimodalLoss(nn.Module):
         )
         self.video_text_contrastive_loss_fn = TextImageContrastiveLoss()
         
-        self.image_loss_fn = ImageLoss(
-            reconstruction_weight=reconstruction_weight,
-            perceptual_weight=perceptual_weight,
-            data_range=data_range,
-            normalize=normalize,
-        )
+        if image_decoder_type.lower() == "generative":
+            self.image_loss_fn = GenerativeImageLoss(
+                gamma1=generative_gamma1,
+                gamma2=generative_gamma2,
+                normalize=normalize,
+            )
+        else:
+            self.image_loss_fn = ImageLoss(
+                reconstruction_weight=reconstruction_weight,
+                perceptual_weight=perceptual_weight,
+                data_range=data_range,
+                normalize=normalize,
+            )
         
         self.video_loss_fn = VideoLoss(
             reconstruction_weight=reconstruction_weight,

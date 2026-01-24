@@ -789,6 +789,17 @@ def main():
     parser.add_argument('--test-num', type=int, default=None, help='测试样本数量')
     parser.add_argument('--no-patch', action='store_true', help='禁用patch-based推理')
     parser.add_argument('--save-images', action='store_true', help='保存重建图像')
+    parser.add_argument(
+        '--image-decoder-type',
+        type=str,
+        choices=['baseline', 'generative'],
+        default=None,
+        help='图像解码器类型（覆盖checkpoint配置）',
+    )
+    parser.add_argument('--generator-type', type=str, default=None, help='生成器类型（默认vae）')
+    parser.add_argument('--generator-ckpt', type=str, default=None, help='生成器权重路径')
+    parser.add_argument('--z-channels', type=int, default=None, help='生成器latent通道数')
+    parser.add_argument('--latent-down', type=int, default=None, help='生成器latent下采样倍率')
     args = parser.parse_args()
     
     # 设置随机种子
@@ -828,6 +839,16 @@ def main():
     if args.save_images:
         config.save_images = True
         config.image_save_dir = os.path.join(config.result_dir, 'reconstructed_images')
+    if args.image_decoder_type is not None:
+        config.image_decoder_type = args.image_decoder_type
+    if args.generator_type is not None:
+        config.generator_type = args.generator_type
+    if args.generator_ckpt is not None:
+        config.generator_ckpt = args.generator_ckpt
+    if args.z_channels is not None:
+        config.z_channels = args.z_channels
+    if args.latent_down is not None:
+        config.latent_down = args.latent_down
     
     if args.snr_list:
         config.snr_list = [float(x.strip()) for x in args.snr_list.split(',')]
@@ -888,12 +909,27 @@ def main():
             'channel_type': config.channel_type,
             'snr_db': config.snr_db,
             'normalize_inputs': getattr(config, "normalize", False),
+            'image_decoder_type': getattr(config, "image_decoder_type", "baseline"),
+            'generator_type': getattr(config, "generator_type", "vae"),
+            'generator_ckpt': getattr(config, "generator_ckpt", None),
+            'z_channels': getattr(config, "z_channels", 4),
+            'latent_down': getattr(config, "latent_down", 8),
         }
         
         # 如果检查点中包含模型配置，使用检查点的配置
         if isinstance(checkpoint, dict) and 'model_config' in checkpoint:
             model_kwargs.update(checkpoint['model_config'])
             logger.info("从检查点恢复模型配置")
+        if args.image_decoder_type is not None:
+            model_kwargs["image_decoder_type"] = config.image_decoder_type
+        if args.generator_type is not None:
+            model_kwargs["generator_type"] = config.generator_type
+        if args.generator_ckpt is not None:
+            model_kwargs["generator_ckpt"] = config.generator_ckpt
+        if args.z_channels is not None:
+            model_kwargs["z_channels"] = config.z_channels
+        if args.latent_down is not None:
+            model_kwargs["latent_down"] = config.latent_down
         
         # 创建模型
         model = MultimodalJSCC(**model_kwargs)

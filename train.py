@@ -69,6 +69,11 @@ def create_model(config: TrainingConfig) -> MultimodalJSCC:
         pretrained=getattr(config, 'pretrained', False), # 【Phase 1】预训练权重
         freeze_encoder=getattr(config, 'freeze_encoder', False),  # 【Phase 1】冻结编码器
         pretrained_model_name=getattr(config, 'pretrained_model_name', 'swin_tiny_patch4_window7_224'),
+        image_decoder_type=getattr(config, "image_decoder_type", "baseline"),
+        generator_type=getattr(config, "generator_type", "vae"),
+        generator_ckpt=getattr(config, "generator_ckpt", None),
+        z_channels=getattr(config, "z_channels", 4),
+        latent_down=getattr(config, "latent_down", 8),
         video_hidden_dim=config.video_hidden_dim,
         video_num_frames=config.video_num_frames,
         video_use_optical_flow=config.video_use_optical_flow,
@@ -104,6 +109,7 @@ def create_loss_fn(config: TrainingConfig) -> MultimodalLoss:
         text_weight=config.text_weight,
         image_weight=config.image_weight,
         video_weight=config.video_weight,
+        image_decoder_type=getattr(config, "image_decoder_type", "baseline"),
         reconstruction_weight=config.reconstruction_weight,
         perceptual_weight=config.perceptual_weight,
         temporal_weight=config.temporal_weight,
@@ -118,6 +124,8 @@ def create_loss_fn(config: TrainingConfig) -> MultimodalLoss:
         use_adversarial=getattr(config, 'use_adversarial', False),  # 【Phase 3】是否使用对抗训练
         condition_margin_weight=getattr(config, "condition_margin_weight", 0.0),
         condition_margin=getattr(config, "condition_margin", 0.05),
+        generative_gamma1=getattr(config, "generative_gamma1", 1.0),
+        generative_gamma2=getattr(config, "generative_gamma2", 0.1),
         normalize=getattr(config, "normalize", False),
         data_range=1.0
     )
@@ -820,6 +828,29 @@ def main():
         default=None,
         help='启用梯度检查点以节省显存',
     )
+    parser.add_argument(
+        '--image-decoder-type',
+        type=str,
+        choices=['baseline', 'generative'],
+        default=None,
+        help='图像解码器类型',
+    )
+    parser.add_argument(
+        '--generator-type',
+        type=str,
+        default=None,
+        help='生成器类型（默认vae）',
+    )
+    parser.add_argument(
+        '--generator-ckpt',
+        type=str,
+        default=None,
+        help='生成器权重路径（VAE等）',
+    )
+    parser.add_argument('--z-channels', type=int, default=None, help='生成器latent通道数')
+    parser.add_argument('--latent-down', type=int, default=None, help='生成器latent下采样倍率')
+    parser.add_argument('--generative-gamma1', type=float, default=None, help='生成式图像MSE权重')
+    parser.add_argument('--generative-gamma2', type=float, default=None, help='生成式图像LPIPS权重')
     parser.add_argument('--local-rank', type=int, default=None, help='分布式训练的本地进程rank')
     parser.add_argument('--distributed', action='store_true', help='启用分布式训练')
     args = parser.parse_args()
@@ -882,6 +913,20 @@ def main():
         config.use_amp = args.use_amp
     if args.use_gradient_checkpointing is not None:
         config.use_gradient_checkpointing = args.use_gradient_checkpointing
+    if args.image_decoder_type:
+        config.image_decoder_type = args.image_decoder_type
+    if args.generator_type:
+        config.generator_type = args.generator_type
+    if args.generator_ckpt:
+        config.generator_ckpt = args.generator_ckpt
+    if args.z_channels is not None:
+        config.z_channels = args.z_channels
+    if args.latent_down is not None:
+        config.latent_down = args.latent_down
+    if args.generative_gamma1 is not None:
+        config.generative_gamma1 = args.generative_gamma1
+    if args.generative_gamma2 is not None:
+        config.generative_gamma2 = args.generative_gamma2
     if args.train_snr_random:
         config.train_snr_strategy = "random"
         config.train_snr_random = True
@@ -920,6 +965,7 @@ def main():
     logger.info(f"数据目录: {config.data_dir}")
     logger.info(f"训练清单: {config.train_manifest}")
     logger.info(f"验证清单: {config.val_manifest}")
+    logger.info(f"图像解码器类型: {getattr(config, 'image_decoder_type', 'baseline')}")
     logger.info(
         "视频采样设置: clip_len=%d stride=%d train_strategy=%s val_strategy=%s",
         config.video_clip_len,
@@ -1198,6 +1244,11 @@ def main():
         'pretrained': getattr(config, 'pretrained', False),
         'freeze_encoder': getattr(config, 'freeze_encoder', False),
         'pretrained_model_name': getattr(config, 'pretrained_model_name', None),
+        'image_decoder_type': getattr(config, 'image_decoder_type', 'baseline'),
+        'generator_type': getattr(config, 'generator_type', 'vae'),
+        'generator_ckpt': getattr(config, 'generator_ckpt', None),
+        'z_channels': getattr(config, 'z_channels', 4),
+        'latent_down': getattr(config, 'latent_down', 8),
         'video_clip_len': config.video_clip_len,
         'video_stride': config.video_stride,
         'video_sampling_strategy': config.video_sampling_strategy,

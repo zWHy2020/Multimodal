@@ -100,6 +100,13 @@ class TrainingConfig:
         self.img_num_heads = [3, 6, 12, 24]  # 从 [3, 6, 12, 24] 减小
         self.img_output_dim = 256
         self.mlp_ratio = 4.0
+        self.image_decoder_type = "baseline"
+        self.generator_type = "vae"
+        self.generator_ckpt = None
+        self.z_channels = 4
+        self.latent_down = 8
+        self.generative_gamma1 = 1.0
+        self.generative_gamma2 = 0.1
         
         self.video_hidden_dim = 384
         self.video_num_frames = 10
@@ -242,6 +249,13 @@ class EvaluationConfig:
         self.img_num_heads = [3, 6, 12, 24]  # 从 [3, 6, 12, 24] 减小
         self.img_output_dim = 256
         self.pretrained_model_name = None  # 推理时可手动指定，与训练保持一致
+        self.image_decoder_type = "baseline"
+        self.generator_type = "vae"
+        self.generator_ckpt = None
+        self.z_channels = 4
+        self.latent_down = 8
+        self.generative_gamma1 = 1.0
+        self.generative_gamma2 = 0.1
         
         self.video_hidden_dim = 256
         self.video_num_frames = 10

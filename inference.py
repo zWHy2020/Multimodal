@@ -1014,6 +1014,16 @@ def load_model(model_path: str, config: EvaluationConfig, device: torch.device, 
         model_config['freeze_encoder'] = False
         if 'img_embed_dims' in model_config:
             config.img_embed_dims = model_config['img_embed_dims']
+        if getattr(config, "image_decoder_type_override", None) is not None:
+            model_config["image_decoder_type"] = config.image_decoder_type_override
+        if getattr(config, "generator_type_override", None) is not None:
+            model_config["generator_type"] = config.generator_type_override
+        if getattr(config, "generator_ckpt_override", None) is not None:
+            model_config["generator_ckpt"] = config.generator_ckpt_override
+        if getattr(config, "z_channels_override", None) is not None:
+            model_config["z_channels"] = config.z_channels_override
+        if getattr(config, "latent_down_override", None) is not None:
+            model_config["latent_down"] = config.latent_down_override
         if getattr(config, "pretrained_model_name", None):
             logger.info(
                 "使用命令行指定的 pretrained_model_name: %s",
@@ -1061,6 +1071,11 @@ def load_model(model_path: str, config: EvaluationConfig, device: torch.device, 
             'channel_type': config.channel_type,
             'snr_db': config.snr_db,
             'normalize_inputs': getattr(config, "normalize", False),
+            'image_decoder_type': getattr(config, "image_decoder_type", "baseline"),
+            'generator_type': getattr(config, "generator_type", "vae"),
+            'generator_ckpt': getattr(config, "generator_ckpt", None),
+            'z_channels': getattr(config, "z_channels", 4),
+            'latent_down': getattr(config, "latent_down", 8),
             'pretrained': False, # 推理时强制关闭
         }
         if getattr(config, "pretrained_model_name", None):
@@ -1254,6 +1269,17 @@ def main():
         default=None,
         help='手动指定训练时的预训练主干名称（例如 swin_small_patch4_window7_224）',
     )
+    parser.add_argument(
+        '--image-decoder-type',
+        type=str,
+        choices=['baseline', 'generative'],
+        default=None,
+        help='图像解码器类型（覆盖checkpoint配置）',
+    )
+    parser.add_argument('--generator-type', type=str, default=None, help='生成器类型（默认vae）')
+    parser.add_argument('--generator-ckpt', type=str, default=None, help='生成器权重路径')
+    parser.add_argument('--z-channels', type=int, default=None, help='生成器latent通道数')
+    parser.add_argument('--latent-down', type=int, default=None, help='生成器latent下采样倍率')
     args = parser.parse_args()
     
     # 设置随机种子
@@ -1271,6 +1297,21 @@ def main():
         config.snr_max = args.snr_max
     config.use_patch_inference = bool(args.patch)
     config.pretrained_model_name = args.pretrained_model_name
+    config.image_decoder_type_override = args.image_decoder_type
+    config.generator_type_override = args.generator_type
+    config.generator_ckpt_override = args.generator_ckpt
+    config.z_channels_override = args.z_channels
+    config.latent_down_override = args.latent_down
+    if args.image_decoder_type is not None:
+        config.image_decoder_type = args.image_decoder_type
+    if args.generator_type is not None:
+        config.generator_type = args.generator_type
+    if args.generator_ckpt is not None:
+        config.generator_ckpt = args.generator_ckpt
+    if args.z_channels is not None:
+        config.z_channels = args.z_channels
+    if args.latent_down is not None:
+        config.latent_down = args.latent_down
     config.infer_window_len = args.infer_window_len
     config.infer_window_stride = args.infer_window_stride
     config.infer_window_blend = args.infer_window_blend
@@ -1507,8 +1548,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
-
-

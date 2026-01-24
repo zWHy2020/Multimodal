@@ -15,7 +15,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from multimodal_jscc import MultimodalJSCC
-from losses import MultimodalLoss
+from losses import MultimodalLoss, GenerativeImageLoss
 from data_loader import MultimodalDataLoader
 from config import TrainingConfig
 from utils import load_manifest, makedirs
@@ -40,14 +40,59 @@ def quick_check_tensor(tensor, name):
     return len(issues) == 0, issues
 
 
+def run_self_test(device: torch.device) -> None:
+    print("\n[SelfTest] 1) 构造随机batch并跑前向传播...")
+    model = MultimodalJSCC(
+        img_size=(224, 224),
+        patch_size=4,
+        image_decoder_type="generative",
+        generator_ckpt=None,
+        normalize_inputs=False,
+    ).to(device)
+    model.eval()
+    images = torch.rand(2, 3, 224, 224, device=device)
+    with torch.no_grad():
+        outputs = model(image_input=images, snr_db=10.0)
+    pred = outputs["image_decoded"]
+    print(f"  输出shape: {tuple(pred.shape)}")
+    if pred.shape != images.shape:
+        raise RuntimeError("SelfTest失败：输出shape与输入不一致")
+    pred_min = pred.min().item()
+    pred_max = pred.max().item()
+    print(f"  输出范围: min={pred_min:.4f}, max={pred_max:.4f}")
+    if pred_min < -1e-3 or pred_max > 1.0 + 1e-3:
+        raise RuntimeError("SelfTest失败：输出范围不在[0,1]")
+
+    print("[SelfTest] 2) GenerativeImageLoss 反向传播...")
+    model.train()
+    pred = model(image_input=images, snr_db=10.0)["image_decoded"]
+    loss_fn = GenerativeImageLoss(gamma1=1.0, gamma2=0.1, normalize=False).to(device)
+    loss = loss_fn(pred, images)[0]
+    loss.backward()
+    print("  反向传播成功")
+
+    print("[SelfTest] 3) 确认generator requires_grad=False...")
+    generator_params = list(model.image_decoder.generator.parameters())
+    if any(param.requires_grad for param in generator_params):
+        raise RuntimeError("SelfTest失败：generator参数未冻结")
+    print("  generator参数已冻结")
+
+
 def main():
     parser = argparse.ArgumentParser(description='快速 NaN 诊断')
-    parser.add_argument('--data-dir', type=str, required=True, help='数据目录')
+    parser.add_argument('--data-dir', type=str, default=None, help='数据目录')
     parser.add_argument('--batch-size', type=int, default=4, help='批次大小')
+    parser.add_argument('--self-test', action='store_true', help='运行最小自测（不依赖数据）')
     args = parser.parse_args()
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}")
+
+    if args.self_test:
+        run_self_test(device)
+        return
+    if not args.data_dir:
+        raise ValueError("--data-dir 在非 --self-test 模式下是必需的")
     
     # 创建配置
     config = TrainingConfig()
@@ -301,4 +346,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
