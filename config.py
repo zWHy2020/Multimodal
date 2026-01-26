@@ -63,8 +63,8 @@ class TrainingConfig:
         self.rate_weight = 1e-4  # 【新增】码率/能量约束权重
         self.temporal_consistency_weight = 0.02  # 【新增】视频时序一致性正则权重
         # 文本引导与条件约束（路线1默认）
-        self.use_text_guidance_image = False
-        self.use_text_guidance_video = False
+        self.use_text_guidance_image = True
+        self.use_text_guidance_video = True
         self.enforce_text_condition = True
         self.condition_margin_weight = 0.1
         self.condition_margin = 0.05
@@ -100,9 +100,9 @@ class TrainingConfig:
         self.img_num_heads = [3, 6, 12, 24]  # 从 [3, 6, 12, 24] 减小
         self.img_output_dim = 256
         self.mlp_ratio = 4.0
-        self.image_decoder_type = "baseline"
+        self.image_decoder_type = "generative"
         self.generator_type = "vae"
-        self.generator_ckpt = None
+        self.generator_ckpt = "stabilityai/sd-vae-ft-mse"
         self.z_channels = 4
         self.latent_down = 8
         self.generative_gamma1 = 1.0
@@ -113,7 +113,7 @@ class TrainingConfig:
         self.video_use_optical_flow = True  # 默认启用光流用于时序对齐
         self.video_use_convlstm = True  # 默认启用ConvLSTM建模时序
         self.video_output_dim = 256
-        self.video_decoder_type = "unet"
+        self.video_decoder_type = "swin"
         self.video_unet_base_channels = 64
         self.video_unet_num_down = 4
         self.video_unet_num_res_blocks = 3
@@ -272,8 +272,8 @@ class EvaluationConfig:
         
         self.channel_type = "awgn"
         # 文本引导与条件约束（评估侧保持与训练一致的开关）
-        self.use_text_guidance_image = False
-        self.use_text_guidance_video = False
+        self.use_text_guidance_image = True
+        self.use_text_guidance_video = True
         self.enforce_text_condition = True
         self.condition_prob = 0.0  # 评估默认不触发额外 condition-margin 计算
         self.condition_margin = 0.05
