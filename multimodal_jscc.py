@@ -13,6 +13,8 @@ import math
 
 from text_encoder import TextJSCCEncoder, TextJSCCDecoder
 from image_encoder import ImageJSCCEncoder, ImageJSCCDecoder
+from generative_image_decoder import GenerativeImageJSCCDecoder
+from generator_adapter import VAEGeneratorAdapter
 from video_encoder import VideoJSCCEncoder, VideoJSCCDecoder
 from video_unet import VideoUNetDecoder
 from cross_attention import MultiModalCrossAttention
@@ -93,6 +95,11 @@ class MultimodalJSCC(nn.Module):
         pretrained: bool = False,  # 【Phase 1】是否使用预训练权重
         freeze_encoder: bool = False,  # 【Phase 1】是否冻结编码器主干
         pretrained_model_name: str = 'swin_tiny_patch4_window7_224',
+        image_decoder_type: str = "baseline",
+        generator_type: str = "vae",
+        generator_ckpt: Optional[str] = None,
+        z_channels: int = 4,
+        latent_down: int = 8,
         
         
         # 视频编码器参数
@@ -135,6 +142,11 @@ class MultimodalJSCC(nn.Module):
         # 【Phase 1】保存预训练参数
         self.pretrained = pretrained
         self.freeze_encoder = freeze_encoder
+        self.image_decoder_type = image_decoder_type
+        self.generator_type = generator_type
+        self.generator_ckpt = generator_ckpt
+        self.z_channels = z_channels
+        self.latent_down = latent_down
         
         # 文本编码器和解码器
         self.text_encoder = TextJSCCEncoder(
@@ -171,20 +183,44 @@ class MultimodalJSCC(nn.Module):
             use_gradient_checkpointing=use_gradient_checkpointing,
             # 不传入 patch_embed, swin_layers, swin_norm，让编码器使用独立路径（768维）
         )
-        self.image_decoder = ImageJSCCDecoder(
-            img_size=img_size,
-            patch_size=patch_size,
-            embed_dims=img_embed_dims,
-            depths=img_depths,
-            num_heads=img_num_heads,
-            window_size=img_window_size,
-            mlp_ratio=mlp_ratio,
-            input_dim=img_output_dim,
-            semantic_context_dim=text_output_dim,  # 【修复】传入语义上下文维度，与 VideoJSCCDecoder 保持一致
-            normalize_output=normalize_inputs,
-            use_gradient_checkpointing=use_gradient_checkpointing,
-            # 编码器和解码器都使用 embed_dims，维度完全匹配，无需特殊 guide_dim
-        )
+        if image_decoder_type.lower() == "generative":
+            generator_adapter = VAEGeneratorAdapter(
+                z_channels=z_channels,
+                latent_down=latent_down,
+                generator_type=generator_type,
+                pretrained_path=generator_ckpt,
+            )
+            self.image_decoder = GenerativeImageJSCCDecoder(
+                img_size=img_size,
+                patch_size=patch_size,
+                embed_dims=img_embed_dims,
+                depths=img_depths,
+                num_heads=img_num_heads,
+                window_size=img_window_size,
+                mlp_ratio=mlp_ratio,
+                input_dim=img_output_dim,
+                semantic_context_dim=text_output_dim,
+                normalize_output=normalize_inputs,
+                use_gradient_checkpointing=use_gradient_checkpointing,
+                z_channels=z_channels,
+                latent_down=latent_down,
+                generator_adapter=generator_adapter,
+            )
+        else:
+            self.image_decoder = ImageJSCCDecoder(
+                img_size=img_size,
+                patch_size=patch_size,
+                embed_dims=img_embed_dims,
+                depths=img_depths,
+                num_heads=img_num_heads,
+                window_size=img_window_size,
+                mlp_ratio=mlp_ratio,
+                input_dim=img_output_dim,
+                semantic_context_dim=text_output_dim,  # 【修复】传入语义上下文维度，与 VideoJSCCDecoder 保持一致
+                normalize_output=normalize_inputs,
+                use_gradient_checkpointing=use_gradient_checkpointing,
+                # 编码器和解码器都使用 embed_dims，维度完全匹配，无需特殊 guide_dim
+            )
         
         # 视频编码器和解码器（独立主干，使用 video_hidden_dim=256）
         self.video_encoder = VideoJSCCEncoder(
