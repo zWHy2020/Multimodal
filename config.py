@@ -249,9 +249,9 @@ class EvaluationConfig:
         self.img_num_heads = [3, 6, 12, 24]  # 从 [3, 6, 12, 24] 减小
         self.img_output_dim = 256
         self.pretrained_model_name = None  # 推理时可手动指定，与训练保持一致
-        self.image_decoder_type = "baseline"
+        self.image_decoder_type = "generative"
         self.generator_type = "vae"
-        self.generator_ckpt = None
+        self.generator_ckpt = "stabilityai/sd-vae-ft-mse"
         self.z_channels = 4
         self.latent_down = 8
         self.generative_gamma1 = 1.0
@@ -262,7 +262,7 @@ class EvaluationConfig:
         self.video_use_optical_flow = True  # 推理侧默认启用光流
         self.video_use_convlstm = True  # 推理侧默认启用ConvLSTM
         self.video_output_dim = 256
-        self.video_decoder_type = "unet"
+        self.video_decoder_type = "swin"
         self.video_unet_base_channels = 64
         self.video_unet_num_down = 4
         self.video_unet_num_res_blocks = 3
