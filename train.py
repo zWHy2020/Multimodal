@@ -194,6 +194,33 @@ def compute_bandwidth_ratio(config: TrainingConfig, epoch: int) -> float:
     return start + (end - start) * progress
 
 
+def _align_video_gop_size(config: TrainingConfig, logger: Optional[logging.Logger] = None) -> None:
+    clip_len = int(getattr(config, "video_clip_len", 0) or 0)
+    gop_size = int(getattr(config, "video_gop_size", 0) or 0)
+    if clip_len <= 0:
+        return
+    if gop_size <= 0:
+        config.video_gop_size = clip_len
+        if logger is not None:
+            logger.warning(
+                "video_gop_size未设置，已自动对齐为video_clip_len=%d。",
+                clip_len,
+            )
+        return
+    if clip_len % gop_size == 0:
+        return
+    divisors = [d for d in range(1, clip_len + 1) if clip_len % d == 0]
+    closest = min(divisors, key=lambda d: (abs(d - gop_size), d))
+    if logger is not None:
+        logger.warning(
+            "video_gop_size=%d不能整除video_clip_len=%d，已自动调整为%d。",
+            gop_size,
+            clip_len,
+            closest,
+        )
+    config.video_gop_size = closest
+
+
 def _log_nonfinite_tensor(
     logger: logging.Logger,
     tensor: torch.Tensor,
@@ -959,6 +986,8 @@ def main():
         logger.addHandler(logging.NullHandler())
         logger.disabled = True
     
+    _align_video_gop_size(config, logger if is_main_process else None)
+
     logger.info("=" * 80)
     logger.info("多模态JSCC训练脚本")
     logger.info("=" * 80)
