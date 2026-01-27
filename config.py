@@ -108,16 +108,18 @@ class TrainingConfig:
         self.generative_gamma1 = 1.0
         self.generative_gamma2 = 0.1
         
-        self.video_hidden_dim = 384
+        self.video_hidden_dim = 192
         self.video_num_frames = 10
         self.video_use_optical_flow = True  # 默认启用光流用于时序对齐
         self.video_use_convlstm = True  # 默认启用ConvLSTM建模时序
-        self.video_output_dim = 256
+        self.video_output_dim = 192
         self.video_decoder_type = "swin"
         self.video_unet_base_channels = 64
         self.video_unet_num_down = 4
         self.video_unet_num_res_blocks = 3
         self.video_decode_chunk_size = None  # 视频解码分段大小（None表示不分段）
+        self.video_gop_size = 6  # GOP长度（用于分组处理，降低显存）
+        self.video_latent_downsample_stride = 2  # 视频潜空间下采样步幅
         
         self.channel_type = "awgn"
       
@@ -170,6 +172,11 @@ class TrainingConfig:
             f"{getattr(self, 'video_stride', None)} train_strategy="
             f"{getattr(self, 'video_sampling_strategy', None)} eval_strategy="
             f"{getattr(self, 'video_eval_sampling_strategy', None)}"
+        )
+        log_func(
+            "Video GOP/latent: gop_size="
+            f"{getattr(self, 'video_gop_size', None)} latent_stride="
+            f"{getattr(self, 'video_latent_downsample_stride', None)}"
         )
         log_func("=========================================\n")
 

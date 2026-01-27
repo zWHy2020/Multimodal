@@ -9,6 +9,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint_sequential
 from typing import Optional, Tuple, List, Dict, Any
 import math
 import logging
@@ -58,9 +59,11 @@ class LatentTransformer(nn.Module):
         latent_dim: int,
         num_res_blocks: int = 2,
         downsample_stride: int = 2,
+        use_gradient_checkpointing: bool = False,
     ):
         super().__init__()
         self.downsample_stride = downsample_stride
+        self.use_gradient_checkpointing = use_gradient_checkpointing
         self.stem = nn.Sequential(
             nn.Conv2d(in_channels, latent_dim, kernel_size=3, stride=downsample_stride, padding=1),
             nn.ReLU(inplace=True),
@@ -82,7 +85,10 @@ class LatentTransformer(nn.Module):
         B, T, C, H, W = video_frames.shape
         x = video_frames.view(B * T, C, H, W)
         x = self.stem(x)
-        x = self.res_blocks(x)
+        if self.use_gradient_checkpointing and self.training:
+            x = checkpoint_sequential(self.res_blocks, len(self.res_blocks), x)
+        else:
+            x = self.res_blocks(x)
         _, C_latent, H_latent, W_latent = x.shape
         x = x.view(B, T, C_latent, H_latent, W_latent)
         return x
@@ -101,8 +107,10 @@ class JSCCEncoder(nn.Module):
         hidden_dim: int,
         out_channels: int,
         num_res_blocks: int = 3,
+        use_gradient_checkpointing: bool = False,
     ):
         super().__init__()
+        self.use_gradient_checkpointing = use_gradient_checkpointing
         self.head = nn.Sequential(
             nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
@@ -114,7 +122,10 @@ class JSCCEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.head(x)
-        x = self.body(x)
+        if self.use_gradient_checkpointing and self.training:
+            x = checkpoint_sequential(self.body, len(self.body), x)
+        else:
+            x = self.body(x)
         x = self.tail(x)
         return x
 
@@ -132,8 +143,10 @@ class JSCCDecoder(nn.Module):
         hidden_dim: int,
         out_channels: int,
         num_res_blocks: int = 3,
+        use_gradient_checkpointing: bool = False,
     ):
         super().__init__()
+        self.use_gradient_checkpointing = use_gradient_checkpointing
         self.head = nn.Sequential(
             nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
@@ -145,7 +158,10 @@ class JSCCDecoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.head(x)
-        x = self.body(x)
+        if self.use_gradient_checkpointing and self.training:
+            x = checkpoint_sequential(self.body, len(self.body), x)
+        else:
+            x = self.body(x)
         x = self.tail(x)
         return x
 
@@ -279,9 +295,11 @@ class LatentInversion(nn.Module):
         num_res_blocks: int = 2,
         upsample_stride: int = 2,
         normalize_output: bool = False,
+        use_gradient_checkpointing: bool = False,
     ):
         super().__init__()
         self.normalize_output = normalize_output
+        self.use_gradient_checkpointing = use_gradient_checkpointing
         self.head = nn.Sequential(
             nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
@@ -305,7 +323,10 @@ class LatentInversion(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.head(x)
-        x = self.body(x)
+        if self.use_gradient_checkpointing and self.training:
+            x = checkpoint_sequential(self.body, len(self.body), x)
+        else:
+            x = self.body(x)
         x = self.upsample(x)
         x = self.tail(x)
         x = (x + 1.0) / 2.0
@@ -688,6 +709,8 @@ class VideoJSCCEncoder(nn.Module):
         use_optical_flow: bool = True,
         use_convlstm: bool = True,
         output_dim: int = 256,
+        gop_size: Optional[int] = None,
+        latent_downsample_stride: int = 2,
         img_size: Tuple[int, int] = (224, 224),
         patch_size: int = 4,
         patch_embed: Optional[nn.Module] = None,
@@ -707,13 +730,16 @@ class VideoJSCCEncoder(nn.Module):
         self.use_convlstm = use_convlstm
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.target_cbr = target_cbr
+        self.gop_size = gop_size or num_frames
+        self.latent_downsample_stride = latent_downsample_stride
 
         # GOP级别潜空间变换（替代Swin）
         self.latent_transformer = LatentTransformer(
             in_channels=in_channels,
             latent_dim=hidden_dim,
             num_res_blocks=2,
-            downsample_stride=2,
+            downsample_stride=latent_downsample_stride,
+            use_gradient_checkpointing=use_gradient_checkpointing,
         )
 
         # JSCC深度编码器
@@ -722,11 +748,12 @@ class VideoJSCCEncoder(nn.Module):
             hidden_dim=hidden_dim,
             out_channels=output_dim,
             num_res_blocks=3,
+            use_gradient_checkpointing=use_gradient_checkpointing,
         )
         self.snr_modulator = SNRModulator(output_dim)
 
-        # 共性/个性特征提取
-        self.common_extractor = CommonFeatureExtractor(output_dim, num_frames)
+        # 共性/个性特征提取（按GOP长度构建）
+        self.common_extractor = CommonFeatureExtractor(output_dim, self.gop_size)
 
         # 熵模型估计特征重要性
         self.entropy_model = EntropyModel(
@@ -745,6 +772,44 @@ class VideoJSCCEncoder(nn.Module):
         # 记录码率信息
         self.last_rate_stats: Dict[str, torch.Tensor] = {}
     
+    def _encode_gop(
+        self, video_frames: torch.Tensor, snr_db: float
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """编码单个GOP，返回共性/个性特征与掩码均值。"""
+        B, T, C, H, W = video_frames.shape
+        # 1) GOP潜空间变换
+        latent_features = self.latent_transformer(video_frames)  # [B, T, C_latent, H', W']
+
+        # 2) JSCC编码（逐帧）
+        latent_flat = latent_features.view(
+            B * T,
+            latent_features.size(2),
+            latent_features.size(3),
+            latent_features.size(4),
+        )
+        jscc_features = self.jscc_encoder(latent_flat)
+        jscc_features = self.snr_modulator(jscc_features, snr_db)
+        jscc_features = jscc_features.view(
+            B,
+            T,
+            jscc_features.size(1),
+            jscc_features.size(2),
+            jscc_features.size(3),
+        )
+
+        # 3) 提取共性/个性特征
+        common_feature, individual_features = self.common_extractor(jscc_features)
+
+        # 4) 熵模型筛选特征
+        entropy_scores = self.entropy_model(common_feature, individual_features)
+        entropy_mask = self.entropy_model.build_mask(
+            entropy_scores, target_cbr=self.target_cbr, training=self.training
+        )
+        common_feature = common_feature * entropy_mask.mean(dim=1)
+        individual_features = individual_features * entropy_mask
+
+        return common_feature, individual_features, entropy_mask.mean()
+
     def forward(
         self,
         video_frames: torch.Tensor,
@@ -764,25 +829,28 @@ class VideoJSCCEncoder(nn.Module):
         B, T, C, H, W = video_frames.shape
         self.last_input_size = (H, W)
 
-        # 1) GOP潜空间变换
-        latent_features = self.latent_transformer(video_frames)  # [B, T, C_latent, H', W']
+        if T % self.gop_size != 0:
+            raise ValueError(
+                f"video_frames长度T={T}不能被gop_size={self.gop_size}整除。"
+                "请调整video_clip_len或video_gop_size以对齐。"
+            )
 
-        # 2) JSCC编码（逐帧）
-        latent_flat = latent_features.view(B * T, latent_features.size(2), latent_features.size(3), latent_features.size(4))
-        jscc_features = self.jscc_encoder(latent_flat)
-        jscc_features = self.snr_modulator(jscc_features, snr_db)
-        jscc_features = jscc_features.view(B, T, jscc_features.size(1), jscc_features.size(2), jscc_features.size(3))
-
-        # 3) 提取共性/个性特征
-        common_feature, individual_features = self.common_extractor(jscc_features)
-
-        # 4) 熵模型筛选特征
-        entropy_scores = self.entropy_model(common_feature, individual_features)
-        entropy_mask = self.entropy_model.build_mask(
-            entropy_scores, target_cbr=self.target_cbr, training=self.training
-        )
-        common_feature = common_feature * entropy_mask.mean(dim=1)
-        individual_features = individual_features * entropy_mask
+        if T == self.gop_size:
+            common_feature, individual_features, mask_mean = self._encode_gop(video_frames, snr_db)
+        else:
+            common_list = []
+            individual_list = []
+            mask_means = []
+            for start in range(0, T, self.gop_size):
+                end = start + self.gop_size
+                gop_frames = video_frames[:, start:end]
+                common_feature, individual_features, mask_mean = self._encode_gop(gop_frames, snr_db)
+                common_list.append(common_feature)
+                individual_list.append(individual_features)
+                mask_means.append(mask_mean)
+            common_feature = torch.stack(common_list, dim=1).mean(dim=1)
+            individual_features = torch.cat(individual_list, dim=1)
+            mask_mean = torch.stack(mask_means).mean()
 
         # 5) 引导向量来自个性特征
         guide_vectors = self.guide_extractor(
@@ -794,7 +862,7 @@ class VideoJSCCEncoder(nn.Module):
 
         # 码率统计（用于loss）
         self.last_rate_stats = {
-            "video_mask_mean": entropy_mask.mean(),
+            "video_mask_mean": mask_mean,
         }
 
         _log_nonfinite("VideoJSCCEncoder.encoded_features", encoded_features)
@@ -853,6 +921,7 @@ class VideoJSCCDecoder(nn.Module):
             hidden_dim=hidden_dim,
             out_channels=hidden_dim,
             num_res_blocks=3,
+            use_gradient_checkpointing=use_gradient_checkpointing,
         )
 
         # 潜空间逆变换（恢复像素）
@@ -863,6 +932,7 @@ class VideoJSCCDecoder(nn.Module):
             num_res_blocks=2,
             upsample_stride=2,
             normalize_output=normalize_output,
+            use_gradient_checkpointing=use_gradient_checkpointing,
         )
         
         # 引导向量处理器
