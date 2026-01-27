@@ -1071,7 +1071,7 @@ class VideoJSCCDecoder(nn.Module):
             enhanced_features.append(current_feature)
 
         enhanced_features = torch.stack(enhanced_features, dim=1)
-        enhanced_flat = enhanced_features.view(
+        enhanced_flat = enhanced_features.reshape(
             B * T_individual,
             enhanced_features.size(2),
             enhanced_features.size(3),
