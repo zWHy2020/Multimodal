@@ -118,7 +118,7 @@ class TrainingConfig:
         self.video_unet_num_down = 4
         self.video_unet_num_res_blocks = 3
         self.video_decode_chunk_size = None  # 视频解码分段大小（None表示不分段）
-        self.video_gop_size = 6  # GOP长度（用于分组处理，降低显存）
+        self.video_gop_size = 5  # GOP长度（用于分组处理，降低显存，需能整除video_clip_len）
         self.video_latent_downsample_stride = 2  # 视频潜空间下采样步幅
         
         self.channel_type = "awgn"
