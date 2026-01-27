@@ -79,6 +79,8 @@ def create_model(config: TrainingConfig) -> MultimodalJSCC:
         video_use_optical_flow=config.video_use_optical_flow,
         video_use_convlstm=config.video_use_convlstm,
         video_output_dim=config.video_output_dim,
+        video_gop_size=getattr(config, "video_gop_size", None),
+        video_latent_downsample_stride=getattr(config, "video_latent_downsample_stride", 2),
         video_decoder_type=getattr(config, "video_decoder_type", "unet"),
         video_unet_base_channels=getattr(config, "video_unet_base_channels", 64),
         video_unet_num_down=getattr(config, "video_unet_num_down", 4),
