@@ -80,7 +80,17 @@ def create_model(config: TrainingConfig) -> MultimodalJSCC:
         video_use_convlstm=config.video_use_convlstm,
         video_output_dim=config.video_output_dim,
         video_gop_size=getattr(config, "video_gop_size", None),
-        video_latent_downsample_stride=getattr(config, "video_latent_downsample_stride", 2),
+        video_latent_downsample_factor=getattr(
+            config,
+            "video_latent_downsample_factor",
+            getattr(config, "video_latent_downsample_stride", 2),
+        ),
+        video_entropy_max_exact_quantile_elems=getattr(
+            config, "video_entropy_max_exact_quantile_elems", 2_000_000
+        ),
+        video_entropy_quantile_sample_size=getattr(
+            config, "video_entropy_quantile_sample_size", 262_144
+        ),
         video_decoder_type=getattr(config, "video_decoder_type", "unet"),
         video_unet_base_channels=getattr(config, "video_unet_base_channels", 64),
         video_unet_num_down=getattr(config, "video_unet_num_down", 4),
@@ -846,6 +856,24 @@ def main():
         help='视频解码分段大小（仅U-Net解码器生效）',
     )
     parser.add_argument(
+        '--video-latent-downsample-factor',
+        type=int,
+        default=None,
+        help='视频潜空间总下采样倍率（2的幂）',
+    )
+    parser.add_argument(
+        '--video-entropy-quantile-sample-size',
+        type=int,
+        default=None,
+        help='视频熵模型分位数采样大小',
+    )
+    parser.add_argument(
+        '--video-entropy-max-exact-quantile-elems',
+        type=int,
+        default=None,
+        help='视频熵模型精确分位数最大元素数',
+    )
+    parser.add_argument(
         '--use-amp',
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -938,6 +966,13 @@ def main():
         config.video_eval_sampling_strategy = args.video_eval_sampling_strategy
     if args.video_decode_chunk_size is not None:
         config.video_decode_chunk_size = args.video_decode_chunk_size
+    if args.video_latent_downsample_factor is not None:
+        config.video_latent_downsample_factor = args.video_latent_downsample_factor
+        config.video_latent_downsample_stride = args.video_latent_downsample_factor
+    if args.video_entropy_quantile_sample_size is not None:
+        config.video_entropy_quantile_sample_size = args.video_entropy_quantile_sample_size
+    if args.video_entropy_max_exact_quantile_elems is not None:
+        config.video_entropy_max_exact_quantile_elems = args.video_entropy_max_exact_quantile_elems
     if args.use_amp is not None:
         config.use_amp = args.use_amp
     if args.use_gradient_checkpointing is not None:

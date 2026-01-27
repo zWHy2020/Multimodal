@@ -110,12 +110,15 @@ class MultimodalJSCC(nn.Module):
         video_use_convlstm: bool = True,
         video_output_dim: int = 256,
         video_gop_size: Optional[int] = None,
-        video_latent_downsample_stride: int = 2,
+        video_latent_downsample_factor: int = 2,
+        video_latent_downsample_stride: Optional[int] = None,
         video_decoder_type: str = "unet",
         video_unet_base_channels: int = 64,
         video_unet_num_down: int = 4,
         video_unet_num_res_blocks: int = 3,
         video_decode_chunk_size: Optional[int] = None,
+        video_entropy_max_exact_quantile_elems: int = 2_000_000,
+        video_entropy_quantile_sample_size: int = 262_144,
         
         # 信道参数
         channel_type: str = "awgn",
@@ -224,6 +227,9 @@ class MultimodalJSCC(nn.Module):
                 # 编码器和解码器都使用 embed_dims，维度完全匹配，无需特殊 guide_dim
             )
         
+        if video_latent_downsample_stride is not None:
+            video_latent_downsample_factor = video_latent_downsample_stride
+
         # 视频编码器和解码器（独立主干，使用 video_hidden_dim=256）
         self.video_encoder = VideoJSCCEncoder(
             hidden_dim=video_hidden_dim,
@@ -232,11 +238,13 @@ class MultimodalJSCC(nn.Module):
             use_convlstm=video_use_convlstm,
             output_dim=video_output_dim,
             gop_size=video_gop_size,
-            latent_downsample_stride=video_latent_downsample_stride,
+            latent_downsample_factor=video_latent_downsample_factor,
             mlp_ratio=mlp_ratio,
             img_size=img_size,
             patch_size=patch_size,
             use_gradient_checkpointing=use_gradient_checkpointing,
+            entropy_max_exact_quantile_elems=video_entropy_max_exact_quantile_elems,
+            entropy_quantile_sample_size=video_entropy_quantile_sample_size,
             # 不传入 patch_embed, swin_layers, swin_norm，让编码器使用独立路径
         )
         if video_decoder_type.lower() == "swin":
@@ -250,6 +258,7 @@ class MultimodalJSCC(nn.Module):
                 patch_size=patch_size,  # 添加 patch 大小参数，用于上采样
                 semantic_context_dim=text_output_dim,  # 添加语义上下文维度，用于语义对齐层
                 normalize_output=normalize_inputs,
+                latent_upsample_factor=video_latent_downsample_factor,
                 use_gradient_checkpointing=use_gradient_checkpointing,
             )
         else:
