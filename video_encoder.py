@@ -58,16 +58,37 @@ class LatentTransformer(nn.Module):
         in_channels: int,
         latent_dim: int,
         num_res_blocks: int = 2,
-        downsample_stride: int = 2,
+        downsample_factor: int = 2,
+        downsample_stride: Optional[int] = None,
         use_gradient_checkpointing: bool = False,
     ):
         super().__init__()
-        self.downsample_stride = downsample_stride
+        if downsample_stride is not None:
+            downsample_factor = downsample_stride
+        if downsample_factor < 1 or downsample_factor & (downsample_factor - 1) != 0:
+            raise ValueError(
+                f"downsample_factor must be a power of 2, got {downsample_factor}"
+            )
+        self.downsample_factor = downsample_factor
         self.use_gradient_checkpointing = use_gradient_checkpointing
-        self.stem = nn.Sequential(
-            nn.Conv2d(in_channels, latent_dim, kernel_size=3, stride=downsample_stride, padding=1),
-            nn.ReLU(inplace=True),
-        )
+        downsample_layers = []
+        num_downsample = int(math.log2(downsample_factor)) if downsample_factor > 1 else 0
+        if num_downsample == 0:
+            downsample_layers.append(
+                nn.Conv2d(in_channels, latent_dim, kernel_size=3, stride=1, padding=1)
+            )
+            downsample_layers.append(nn.ReLU(inplace=True))
+        else:
+            downsample_layers.append(
+                nn.Conv2d(in_channels, latent_dim, kernel_size=3, stride=2, padding=1)
+            )
+            downsample_layers.append(nn.ReLU(inplace=True))
+            for _ in range(num_downsample - 1):
+                downsample_layers.append(
+                    nn.Conv2d(latent_dim, latent_dim, kernel_size=3, stride=2, padding=1)
+                )
+                downsample_layers.append(nn.ReLU(inplace=True))
+        self.stem = nn.Sequential(*downsample_layers)
         self.res_blocks = nn.Sequential(
             *[ResBlock(latent_dim, latent_dim) for _ in range(num_res_blocks)]
         )
@@ -214,9 +235,13 @@ class EntropyModel(nn.Module):
         channels: int,
         hidden_dim: int = 128,
         temperature: float = 0.2,
+        max_exact_quantile_elems: int = 2_000_000,
+        quantile_sample_size: int = 262_144,
     ):
         super().__init__()
         self.temperature = temperature
+        self.max_exact_quantile_elems = max_exact_quantile_elems
+        self.quantile_sample_size = quantile_sample_size
         self.scorer = nn.Sequential(
             nn.Conv2d(channels * 2, hidden_dim, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
@@ -266,7 +291,24 @@ class EntropyModel(nn.Module):
 
         B = scores.shape[0]
         flat = scores.view(B, -1)
-        quantile = torch.quantile(flat.float(), 1.0 - target_cbr, dim=1)
+        q = 1.0 - target_cbr
+        use_sampled_quantile = (
+            flat.is_cuda and flat.numel() > self.max_exact_quantile_elems
+        )
+        if use_sampled_quantile:
+            numel_per_batch = flat.size(1)
+            sample_size = min(self.quantile_sample_size, numel_per_batch)
+            idx = torch.randint(
+                0,
+                numel_per_batch,
+                (B, sample_size),
+                device=flat.device,
+                dtype=torch.long,
+            )
+            sampled = flat.gather(1, idx)
+            quantile = torch.quantile(sampled.float(), q, dim=1)
+        else:
+            quantile = torch.quantile(flat.float(), q, dim=1)
         threshold_shape = [B] + [1] * (scores.dim() - 1)
         threshold = quantile.view(*threshold_shape).to(scores.dtype)
         hard_mask = (scores >= threshold).float()
@@ -293,11 +335,17 @@ class LatentInversion(nn.Module):
         out_channels: int = 3,
         hidden_dim: int = 128,
         num_res_blocks: int = 2,
-        upsample_stride: int = 2,
+        upsample_factor: int = 2,
+        upsample_stride: Optional[int] = None,
         normalize_output: bool = False,
         use_gradient_checkpointing: bool = False,
     ):
         super().__init__()
+        if upsample_stride is not None:
+            upsample_factor = upsample_stride
+        if upsample_factor < 1 or upsample_factor & (upsample_factor - 1) != 0:
+            raise ValueError(f"upsample_factor must be a power of 2, got {upsample_factor}")
+        self.upsample_factor = upsample_factor
         self.normalize_output = normalize_output
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.head = nn.Sequential(
@@ -307,12 +355,17 @@ class LatentInversion(nn.Module):
         self.body = nn.Sequential(
             *[ResBlock(hidden_dim, hidden_dim) for _ in range(num_res_blocks)]
         )
-        self.upsample = nn.ConvTranspose2d(
-            hidden_dim,
-            hidden_dim,
-            kernel_size=upsample_stride,
-            stride=upsample_stride,
-        )
+        num_upsample = int(math.log2(upsample_factor)) if upsample_factor > 1 else 0
+        if num_upsample == 0:
+            self.upsample = nn.Identity()
+        else:
+            upsample_layers = []
+            for _ in range(num_upsample):
+                upsample_layers.append(
+                    nn.ConvTranspose2d(hidden_dim, hidden_dim, kernel_size=2, stride=2)
+                )
+                upsample_layers.append(nn.ReLU(inplace=True))
+            self.upsample = nn.Sequential(*upsample_layers)
         self.tail = nn.Sequential(
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden_dim, out_channels, kernel_size=3, padding=1),
@@ -710,7 +763,8 @@ class VideoJSCCEncoder(nn.Module):
         use_convlstm: bool = True,
         output_dim: int = 256,
         gop_size: Optional[int] = None,
-        latent_downsample_stride: int = 2,
+        latent_downsample_factor: int = 2,
+        latent_downsample_stride: Optional[int] = None,
         img_size: Tuple[int, int] = (224, 224),
         patch_size: int = 4,
         patch_embed: Optional[nn.Module] = None,
@@ -720,8 +774,12 @@ class VideoJSCCEncoder(nn.Module):
         use_gradient_checkpointing: bool = True,
         target_cbr: float = 0.5,
         entropy_temperature: float = 0.2,
+        entropy_max_exact_quantile_elems: int = 2_000_000,
+        entropy_quantile_sample_size: int = 262_144,
     ):
         super().__init__()
+        if latent_downsample_stride is not None:
+            latent_downsample_factor = latent_downsample_stride
         self.in_channels = in_channels
         self.hidden_dim = hidden_dim
         self.num_frames = num_frames
@@ -731,14 +789,14 @@ class VideoJSCCEncoder(nn.Module):
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.target_cbr = target_cbr
         self.gop_size = gop_size or num_frames
-        self.latent_downsample_stride = latent_downsample_stride
+        self.latent_downsample_factor = latent_downsample_factor
 
         # GOP级别潜空间变换（替代Swin）
         self.latent_transformer = LatentTransformer(
             in_channels=in_channels,
             latent_dim=hidden_dim,
             num_res_blocks=2,
-            downsample_stride=latent_downsample_stride,
+            downsample_factor=latent_downsample_factor,
             use_gradient_checkpointing=use_gradient_checkpointing,
         )
 
@@ -760,6 +818,8 @@ class VideoJSCCEncoder(nn.Module):
             channels=output_dim,
             hidden_dim=max(64, output_dim // 2),
             temperature=entropy_temperature,
+            max_exact_quantile_elems=entropy_max_exact_quantile_elems,
+            quantile_sample_size=entropy_quantile_sample_size,
         )
 
         # 引导向量提取器（使用个性特征W_i）
@@ -896,6 +956,7 @@ class VideoJSCCDecoder(nn.Module):
         patch_size: int = 4,
         semantic_context_dim: int = 256,
         mlp_ratio: float = 4.0,  # 添加语义上下文维度参数
+        latent_upsample_factor: int = 2,
         normalize_output: bool = False,
         use_gradient_checkpointing: bool = True,
     ):
@@ -930,7 +991,7 @@ class VideoJSCCDecoder(nn.Module):
             out_channels=out_channels,
             hidden_dim=hidden_dim // 2,
             num_res_blocks=2,
-            upsample_stride=2,
+            upsample_factor=latent_upsample_factor,
             normalize_output=normalize_output,
             use_gradient_checkpointing=use_gradient_checkpointing,
         )
