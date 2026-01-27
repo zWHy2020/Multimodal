@@ -266,9 +266,9 @@ class EntropyModel(nn.Module):
 
         B = scores.shape[0]
         flat = scores.view(B, -1)
-        quantile = torch.quantile(flat, 1.0 - target_cbr, dim=1)
+        quantile = torch.quantile(flat.float(), 1.0 - target_cbr, dim=1)
         threshold_shape = [B] + [1] * (scores.dim() - 1)
-        threshold = quantile.view(*threshold_shape)
+        threshold = quantile.view(*threshold_shape).to(scores.dtype)
         hard_mask = (scores >= threshold).float()
 
         if not training:
