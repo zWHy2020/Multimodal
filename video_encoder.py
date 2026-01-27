@@ -83,7 +83,7 @@ class LatentTransformer(nn.Module):
             torch.Tensor: 潜空间特征 [B, T, C_latent, H', W']
         """
         B, T, C, H, W = video_frames.shape
-        x = video_frames.view(B * T, C, H, W)
+        x = video_frames.reshape(B * T, C, H, W)
         x = self.stem(x)
         if self.use_gradient_checkpointing and self.training:
             x = checkpoint_sequential(self.res_blocks, len(self.res_blocks), x)
