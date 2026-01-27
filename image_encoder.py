@@ -908,7 +908,7 @@ class ImageJSCCEncoder(nn.Module):
                 self.pretrained_backbone = timm.create_model(
                     pretrained_model_name,
                     pretrained=True,
-                    img_size=img_size[0],
+                    img_size=img_size,
                     num_classes=0,  # 移除分类头
                     global_pool=''  # 不使用全局池化
                 )
@@ -954,17 +954,6 @@ class ImageJSCCEncoder(nn.Module):
                     final_dim = self.norm.normalized_shape[0] if isinstance(self.norm.normalized_shape, (list, tuple)) else self.norm.normalized_shape
                 else:
                     final_dim = embed_dims[-1]
-                
-                # 【Phase 1】如果freeze_encoder=True，冻结主干网络
-                if self.freeze_encoder:
-                    for param in self.patch_embed.parameters():
-                        param.requires_grad = False
-                    for layer in self.layers:
-                        for param in layer.parameters():
-                            param.requires_grad = False
-                    for param in self.norm.parameters():
-                        param.requires_grad = False
-                    print("【Phase 1】已冻结预训练编码器主干，仅训练适配器层")
                 
                 print(f"【Phase 1】成功加载预训练模型: {pretrained_model_name}")
                 
@@ -1053,6 +1042,19 @@ class ImageJSCCEncoder(nn.Module):
             # 非共享路径的最终维度
             self.norm = norm_layer(embed_dims[-1])
             final_dim = embed_dims[-1]
+
+        if self.freeze_encoder:
+            for param in self.patch_embed.parameters():
+                param.requires_grad = False
+            for layer in self.layers:
+                for param in layer.parameters():
+                    param.requires_grad = False
+            for param in self.norm.parameters():
+                param.requires_grad = False
+            if self.pretrained:
+                print("【Phase 1】已冻结预训练编码器主干，仅训练适配器层")
+            else:
+                print("【Phase 1】已冻结编码器主干（随机初始化），仅训练适配器层")
 
         # 输出投影（依据最终维度构建）
         self.output_proj = nn.Sequential(

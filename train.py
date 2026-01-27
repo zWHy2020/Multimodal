@@ -1115,23 +1115,26 @@ def main():
             #sys.exit(1)
         #model.load_state_dict(state_dict)
     
-    # 【Phase 1】如果启用预训练，记录信息
+    # 【Phase 1】记录预训练/冻结编码器信息
+    real_model = unwrap_model(model)
+    image_encoder = getattr(real_model, "image_encoder", None)
+    image_pretrained_active = bool(getattr(image_encoder, "pretrained", False))
     if getattr(config, 'pretrained', False):
-        real_model = unwrap_model(model)
-        image_encoder = getattr(real_model, "image_encoder", None)
-        image_pretrained_active = bool(getattr(image_encoder, "pretrained", False))
         if image_pretrained_active:
             logger.info(
                 "【Phase 1】使用预训练权重: "
                 f"{getattr(config, 'pretrained_model_name', 'swin_tiny_patch4_window7_224')}"
             )
-            if getattr(config, 'freeze_encoder', False):
-                logger.info("【Phase 1】编码器主干已冻结，仅训练适配器层")
         else:
             logger.info(
                 "【Phase 1】预训练权重在配置中启用，但当前图像编码器未加载预训练权重，"
                 "将使用随机初始化。"
             )
+    if getattr(config, 'freeze_encoder', False):
+        if image_pretrained_active:
+            logger.info("【Phase 1】编码器主干已冻结，仅训练适配器层")
+        else:
+            logger.info("【Phase 1】编码器主干已冻结（随机初始化），仅训练适配器层")
     
     # 打印模型信息
     total_params = sum(p.numel() for p in model.parameters())
@@ -1182,7 +1185,7 @@ def main():
     # 创建混合精度训练的scaler（如果启用）
     scaler = None
     if config.use_amp and config.device.type == "cuda":
-        scaler = torch.cuda.amp.GradScaler()
+        scaler = torch.amp.GradScaler("cuda")
         logger.info("启用混合精度训练（AMP），GradScaler 已启用。")
     elif config.use_amp:
         logger.warning("检测到非CUDA设备，已禁用混合精度训练（AMP）。")

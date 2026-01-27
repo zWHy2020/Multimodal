@@ -107,7 +107,7 @@ class LatentTransformer(nn.Module):
         x = video_frames.reshape(B * T, C, H, W)
         x = self.stem(x)
         if self.use_gradient_checkpointing and self.training:
-            x = checkpoint_sequential(self.res_blocks, len(self.res_blocks), x)
+            x = checkpoint_sequential(self.res_blocks, len(self.res_blocks), x, use_reentrant=False)
         else:
             x = self.res_blocks(x)
         _, C_latent, H_latent, W_latent = x.shape
@@ -144,7 +144,7 @@ class JSCCEncoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.head(x)
         if self.use_gradient_checkpointing and self.training:
-            x = checkpoint_sequential(self.body, len(self.body), x)
+            x = checkpoint_sequential(self.body, len(self.body), x, use_reentrant=False)
         else:
             x = self.body(x)
         x = self.tail(x)
@@ -180,7 +180,7 @@ class JSCCDecoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.head(x)
         if self.use_gradient_checkpointing and self.training:
-            x = checkpoint_sequential(self.body, len(self.body), x)
+            x = checkpoint_sequential(self.body, len(self.body), x, use_reentrant=False)
         else:
             x = self.body(x)
         x = self.tail(x)
@@ -377,7 +377,7 @@ class LatentInversion(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.head(x)
         if self.use_gradient_checkpointing and self.training:
-            x = checkpoint_sequential(self.body, len(self.body), x)
+            x = checkpoint_sequential(self.body, len(self.body), x, use_reentrant=False)
         else:
             x = self.body(x)
         x = self.upsample(x)
