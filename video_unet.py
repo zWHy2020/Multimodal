@@ -20,7 +20,7 @@ class ResBlock(nn.Module):
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
         self.norm2 = nn.GroupNorm(num_groups=min(groups, out_channels), num_channels=out_channels)
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.act = nn.ReLU(inplace=True)
+        self.act = nn.ReLU(inplace=False)
         self.skip = None
         if in_channels != out_channels:
             self.skip = nn.Conv2d(in_channels, out_channels, kernel_size=1)

@@ -77,17 +77,17 @@ class LatentTransformer(nn.Module):
             downsample_layers.append(
                 nn.Conv2d(in_channels, latent_dim, kernel_size=3, stride=1, padding=1)
             )
-            downsample_layers.append(nn.ReLU(inplace=True))
+            downsample_layers.append(nn.ReLU(inplace=False))
         else:
             downsample_layers.append(
                 nn.Conv2d(in_channels, latent_dim, kernel_size=3, stride=2, padding=1)
             )
-            downsample_layers.append(nn.ReLU(inplace=True))
+            downsample_layers.append(nn.ReLU(inplace=False))
             for _ in range(num_downsample - 1):
                 downsample_layers.append(
                     nn.Conv2d(latent_dim, latent_dim, kernel_size=3, stride=2, padding=1)
                 )
-                downsample_layers.append(nn.ReLU(inplace=True))
+                downsample_layers.append(nn.ReLU(inplace=False))
         self.stem = nn.Sequential(*downsample_layers)
         self.res_blocks = nn.Sequential(
             *[ResBlock(latent_dim, latent_dim) for _ in range(num_res_blocks)]
@@ -134,7 +134,7 @@ class JSCCEncoder(nn.Module):
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.head = nn.Sequential(
             nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
         )
         self.body = nn.Sequential(
             *[ResBlock(hidden_dim, hidden_dim) for _ in range(num_res_blocks)]
@@ -170,7 +170,7 @@ class JSCCDecoder(nn.Module):
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.head = nn.Sequential(
             nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
         )
         self.body = nn.Sequential(
             *[ResBlock(hidden_dim, hidden_dim) for _ in range(num_res_blocks)]
@@ -199,9 +199,9 @@ class CommonFeatureExtractor(nn.Module):
         self.num_frames = num_frames
         self.common_conv = nn.Sequential(
             nn.Conv2d(channels * num_frames, channels, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
             nn.Conv2d(channels, channels, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
         )
         self.residual_proj = nn.Conv2d(channels, channels, kernel_size=1)
 
@@ -244,7 +244,7 @@ class EntropyModel(nn.Module):
         self.quantile_sample_size = quantile_sample_size
         self.scorer = nn.Sequential(
             nn.Conv2d(channels * 2, hidden_dim, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
             nn.Conv2d(hidden_dim, channels, kernel_size=1),
         )
 
@@ -350,7 +350,7 @@ class LatentInversion(nn.Module):
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.head = nn.Sequential(
             nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
         )
         self.body = nn.Sequential(
             *[ResBlock(hidden_dim, hidden_dim) for _ in range(num_res_blocks)]
@@ -364,10 +364,10 @@ class LatentInversion(nn.Module):
                 upsample_layers.append(
                     nn.ConvTranspose2d(hidden_dim, hidden_dim, kernel_size=2, stride=2)
                 )
-                upsample_layers.append(nn.ReLU(inplace=True))
+                upsample_layers.append(nn.ReLU(inplace=False))
             self.upsample = nn.Sequential(*upsample_layers)
         self.tail = nn.Sequential(
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
             nn.Conv2d(hidden_dim, out_channels, kernel_size=3, padding=1),
             nn.Tanh(),
         )
@@ -417,7 +417,7 @@ class LightweightTemporalConv(nn.Module):
             layers.append(nn.Sequential(
                 nn.Conv2d(in_ch, hidden_dim, kernel_size=kernel_size, padding=kernel_size//2),
                 nn.GroupNorm(8, hidden_dim),  # 使用GroupNorm替代BN，更节省显存
-                nn.ReLU(inplace=True)
+                nn.ReLU(inplace=False)
             ))
         self.layers = nn.ModuleList(layers)
         
@@ -553,7 +553,7 @@ class LightweightOpticalFlow(nn.Module):
         # 简化的光流估计网络（2层）
         self.flow_net = nn.Sequential(
             nn.Conv2d(in_channels * 2, hidden_dim, kernel_size=3, padding=1, stride=2),  # 下采样减少计算
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
             nn.Conv2d(hidden_dim, 2, kernel_size=3, padding=1),
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)  # 上采样回原尺寸
         )
@@ -667,7 +667,7 @@ class ContextualEncoder(nn.Module):
             layers.extend([
                 nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1),
                 nn.BatchNorm2d(out_ch),
-                nn.ReLU(inplace=True)
+                nn.ReLU(inplace=False)
             ])
             if i < num_layers - 1:
                 layers.append(nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=2, padding=1))
@@ -723,7 +723,7 @@ class ContextualDecoder(nn.Module):
             layers.extend([
                 nn.ConvTranspose2d(in_ch, out_ch, kernel_size=3, padding=1),
                 nn.BatchNorm2d(out_ch) if i < num_layers - 1 else nn.Identity(),
-                nn.ReLU(inplace=True) if i < num_layers - 1 else nn.Sigmoid()
+                nn.ReLU(inplace=False) if i < num_layers - 1 else nn.Sigmoid()
             ])
             if i < num_layers - 1:
                 layers.append(nn.ConvTranspose2d(out_ch, out_ch, kernel_size=3, stride=2, padding=1, output_padding=1))
